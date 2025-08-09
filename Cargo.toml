@@ -1,0 +1,21 @@
+[package]
+name = "canticlec-churn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "*"
+egui = "*"
+env_logger = "*"
+log = "*"
+pixels = "*"
+rand = "*"
+rfd = "*"
+rodio = "*"
+serde = "*"
+serde_json = "*"
+tempfile = "*"
+thiserror = "*"
+tokio = { version = "*", features = ["full"] }
+winit = "*"
+winit_input_helper = "*"

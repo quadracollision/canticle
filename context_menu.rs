@@ -7,18 +7,20 @@ pub enum ContextMenuState {
     BallDirection { ball_index: usize, selected_option: usize },
     BallSpeed { ball_index: usize, speed: f32 }, // speed in grid units per second
     BallSample { ball_index: usize, selected_option: usize },
+    BallColor { ball_index: usize, selected_option: usize },
 }
 
 pub struct ContextMenu {
     pub state: ContextMenuState,
 }
 
-const BALL_MENU_OPTIONS: &[&str] = &["Direction", "Speed", "Sample"];
+const BALL_MENU_OPTIONS: &[&str] = &["Direction", "Speed", "Sample", "Color"];
 const DIRECTION_OPTIONS: &[&str] = &["Up", "Down", "Left", "Right", "Up-Left", "Up-Right", "Down-Left", "Down-Right"];
 const MIN_SPEED: f32 = 0.5;
 const MAX_SPEED: f32 = 10.0;
 const SPEED_STEP: f32 = 0.1;
 const SAMPLE_OPTIONS: &[&str] = &["Kick", "Snare", "Hi-hat", "Load File..."];
+const COLOR_OPTIONS: &[&str] = &["Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Orange"];
 
 impl ContextMenu {
     pub fn new() -> Self {
@@ -69,6 +71,7 @@ impl ContextMenu {
                             self.state = ContextMenuState::BallSpeed { ball_index, speed: current_speed };
                         },
                         2 => self.state = ContextMenuState::BallSample { ball_index, selected_option: 0 },
+                        3 => self.state = ContextMenuState::BallColor { ball_index, selected_option: 0 },
                         _ => {}
                     }
                     return None;
@@ -174,6 +177,28 @@ impl ContextMenu {
                 }
                 None
             }
+            ContextMenuState::BallColor { ball_index, selected_option } => {
+                if input.key_pressed(VirtualKeyCode::Escape) {
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Up) {
+                    let new_option = if selected_option == 0 { COLOR_OPTIONS.len() - 1 } else { selected_option - 1 };
+                    self.state = ContextMenuState::BallColor { ball_index, selected_option: new_option };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Down) {
+                    let new_option = (selected_option + 1) % COLOR_OPTIONS.len();
+                    self.state = ContextMenuState::BallColor { ball_index, selected_option: new_option };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Space) {
+                    let color = COLOR_OPTIONS[selected_option].to_string();
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
+                    return Some(ContextMenuAction::SetColor { ball_index, color });
+                }
+                None
+            }
             ContextMenuState::None => None,
         }
     }
@@ -204,6 +229,12 @@ impl ContextMenu {
                     draw_sample_menu(frame, ball_x, ball_y, selected_option);
                 }
             }
+            ContextMenuState::BallColor { ball_index, selected_option } => {
+                if let Some(ball) = balls.get(ball_index) {
+                    let (ball_x, ball_y) = ball.get_grid_position();
+                    draw_color_menu(frame, ball_x, ball_y, selected_option);
+                }
+            }
             ContextMenuState::None => {}
         }
     }
@@ -214,6 +245,7 @@ pub enum ContextMenuAction {
     SetDirection { ball_index: usize, direction: Direction },
     SetSpeed { ball_index: usize, speed: f32 },
     SetSample { ball_index: usize, sample: String },
+    SetColor { ball_index: usize, color: String },
     OpenFileDialog { ball_index: usize },
 }
 
@@ -647,5 +679,68 @@ fn draw_sample_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_opt
         let text_y = menu_y + 5 + i * 20;
         let is_selected = i == selected_option;
         draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
+    }
+}
+
+fn draw_color_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_option: usize) {
+    let menu_width = CELL_SIZE * 4;
+    let menu_height = CELL_SIZE * 6;
+    
+    // Position menu to the right of the ball, but keep it on screen
+    let mut menu_x = ball_x * CELL_SIZE + CELL_SIZE;
+    let mut menu_y = ball_y * CELL_SIZE;
+    
+    // Adjust if menu would go off screen
+    if menu_x + menu_width > WINDOW_WIDTH {
+        menu_x = ball_x * CELL_SIZE - menu_width;
+    }
+    if menu_y + menu_height > WINDOW_HEIGHT {
+        menu_y = WINDOW_HEIGHT - menu_height;
+    }
+    
+    draw_menu_background(frame, menu_x, menu_y, menu_width, menu_height);
+    draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
+    
+    // Draw color options with color preview
+    for (i, option) in COLOR_OPTIONS.iter().enumerate() {
+        let text_x = menu_x + 25;
+        let text_y = menu_y + 5 + i * 18;
+        let is_selected = i == selected_option;
+        
+        // Draw color preview square
+        let color_preview = get_color_rgb(option);
+        let preview_x = menu_x + 5;
+        let preview_y = text_y + 2;
+        let preview_size = 12;
+        
+        for dy in 0..preview_size {
+            for dx in 0..preview_size {
+                let px = preview_x + dx;
+                let py = preview_y + dy;
+                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
+                    let idx = (py * WINDOW_WIDTH + px) * 4;
+                    frame[idx] = color_preview[0];     // R
+                    frame[idx + 1] = color_preview[1]; // G
+                    frame[idx + 2] = color_preview[2]; // B
+                    frame[idx + 3] = 255;              // A
+                }
+            }
+        }
+        
+        draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
+    }
+}
+
+fn get_color_rgb(color_name: &str) -> [u8; 3] {
+    match color_name {
+        "Red" => [255, 0, 0],
+        "Green" => [0, 255, 0],
+        "Blue" => [0, 0, 255],
+        "Yellow" => [255, 255, 0],
+        "Cyan" => [0, 255, 255],
+        "Magenta" => [255, 0, 255],
+        "White" => [255, 255, 255],
+        "Orange" => [255, 165, 0],
+        _ => [255, 255, 255], // Default to white
     }
 }

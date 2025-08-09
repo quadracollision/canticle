@@ -24,6 +24,7 @@ pub struct Ball {
     pub active: bool,
     pub last_grid_x: usize,
     pub last_grid_y: usize,
+    pub color: String,
 }
 
 impl Ball {
@@ -39,6 +40,7 @@ impl Ball {
             active: false, // Start inactive
             last_grid_x: x,
             last_grid_y: y,
+            color: "White".to_string(), // Default color
         }
     }
     
@@ -62,17 +64,17 @@ impl Ball {
         self.y += dy * movement_speed;
         
         // Check boundaries and reverse if needed
-        let mut reversed = false;
+        let mut _reversed = false;
         if self.x <= 0.0 || self.x >= GRID_WIDTH as f32 {
             self.x = old_x;
             self.direction = self.reverse_horizontal_direction();
-            reversed = true;
+            _reversed = true;
         }
         if self.y <= 0.0 || self.y >= GRID_HEIGHT as f32 {
-            self.y = old_y;
-            self.direction = self.reverse_vertical_direction();
-            reversed = true;
-        }
+              self.y = old_y;
+              self.direction = self.reverse_vertical_direction();
+              _reversed = true;
+          }
         
         // Check if we've entered a new grid cell
         let current_grid_x = self.x.floor() as usize;
@@ -161,6 +163,10 @@ impl Ball {
     
     pub fn set_sample(&mut self, sample_path: String) {
         self.sample_path = Some(sample_path);
+    }
+    
+    pub fn set_color(&mut self, color: String) {
+        self.color = color;
     }
     
     pub fn toggle_active(&mut self) {

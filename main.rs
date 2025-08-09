@@ -3,6 +3,8 @@ mod sequencer;
 mod context_menu;
 mod ball;
 mod square;
+mod programmer;
+mod square_menu;
 
 use audio_engine::AudioEngine;
 use sequencer::run_sequencer;
@@ -29,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  C: Place ball (starts inactive)");
     println!("  P: Toggle ball movement (start all balls / reset to original positions)");
     println!("  Space: Open ball context menu (when cursor is on a ball)");
+    println!("  R: Open square programming menu (when cursor is on a square)");
     println!("  ESC: Close/go back in context menu");
     println!();
     println!("Ball Physics:");
