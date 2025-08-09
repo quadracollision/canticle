@@ -76,25 +76,49 @@ impl SimpleProgramParser {
     /// def example
     /// return
     pub fn parse_program(&self, source: &str) -> Result<Program, String> {
+        let programs = self.parse_multiple_programs(source)?;
+        if programs.is_empty() {
+            return Err("No programs found".to_string());
+        }
+        // Return the first program for backward compatibility
+        Ok(programs[0].clone())
+    }
+    
+    /// Parse multiple function definitions from the same source text
+    pub fn parse_multiple_programs(&self, source: &str) -> Result<Vec<Program>, String> {
         let lines: Vec<&str> = source.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
         
         if lines.is_empty() {
             return Err("Empty program".to_string());
         }
         
-        // First line should be "def function_name"
-        let first_line = lines[0];
-        if !first_line.starts_with("def ") {
-            return Err("Program must start with 'def function_name'".to_string());
+        let mut programs = Vec::new();
+        let mut i = 0;
+        
+        while i < lines.len() {
+            let line = lines[i];
+            
+            if line.starts_with("def ") {
+                let function_name = line[4..].trim().to_string();
+                let (instructions, next_i) = self.parse_block(&lines, i + 1)?;
+                
+                programs.push(Program {
+                    name: function_name,
+                    instructions,
+                    source_text: None, // Parser doesn't preserve original text
+                });
+                
+                i = next_i;
+            } else {
+                return Err(format!("Expected 'def function_name', found: {}", line));
+            }
         }
         
-        let function_name = first_line[4..].trim().to_string();
-        let (instructions, _) = self.parse_block(&lines, 1)?;
+        if programs.is_empty() {
+            return Err("No function definitions found".to_string());
+        }
         
-        Ok(Program {
-            name: function_name,
-            instructions,
-        })
+        Ok(programs)
     }
     
     fn parse_block(&self, lines: &[&str], start_index: usize) -> Result<(Vec<Instruction>, usize), String> {
@@ -104,7 +128,21 @@ impl SimpleProgramParser {
         while i < lines.len() {
             let line = lines[i];
             
-            if line == "return" || line == "end" {
+            if line == "return" {
+                instructions.push(Instruction::Return(None));
+                i += 1;
+                break;
+            }
+            
+            if line.starts_with("return ") {
+                let function_name = line[7..].trim().to_string();
+                instructions.push(Instruction::Return(Some(function_name)));
+                i += 1;
+                break;
+            }
+            
+            if line == "end" {
+                instructions.push(Instruction::End);
                 i += 1;
                 break;
             }
@@ -117,11 +155,19 @@ impl SimpleProgramParser {
                 continue;
             }
             
-            // Handle nested function definitions
+            // Handle nested function definitions - skip them as they should be parsed separately
             if line.starts_with("def ") {
-                let (nested_program, next_i) = self.parse_nested_function(lines, i)?;
-                instructions.push(Instruction::ExecuteProgram(nested_program));
-                i = next_i;
+                // This is a nested function definition, which should be handled at the top level
+                // Skip to the end of this function block
+                let mut depth = 1;
+                i += 1;
+                while i < lines.len() && depth > 0 {
+                    let current_line = lines[i];
+                    if current_line == "end" || current_line.starts_with("return") {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
                 continue;
             }
             
@@ -157,6 +203,7 @@ impl SimpleProgramParser {
         Ok((Program {
             name: function_name,
             instructions,
+            source_text: None, // Parser doesn't preserve original text
         }, next_i))
     }
     
@@ -178,26 +225,28 @@ impl SimpleProgramParser {
                     if object_type == "square" {
                         let coords: Vec<&str> = coords_str.split(',').map(|s| s.trim()).collect();
                         if coords.len() == 2 {
-                            if let (Ok(x), Ok(y)) = (coords[0].parse::<f32>(), coords[1].parse::<f32>()) {
-                                // Parse the embedded program starting from def_part
-                                if !def_part.starts_with("def ") {
-                                    return Err("Expected 'def function_name' after 'with'".to_string());
-                                }
-                                
-                                let function_name = def_part[4..].trim().to_string();
-                                let (instructions, end_index) = self.parse_block(lines, start_index + 1)?;
-                                
-                                let embedded_program = Program {
-                                    name: function_name,
-                                    instructions,
-                                };
-                                
-                                return Ok((Instruction::CreateSquareWithProgram {
-                                    x: Expression::Literal(Value::Number(x)),
-                                    y: Expression::Literal(Value::Number(y)),
-                                    program: embedded_program,
-                                }, end_index));
+                            let x_expr = self.parse_coordinate_expression(coords[0])?;
+                            let y_expr = self.parse_coordinate_expression(coords[1])?;
+                            
+                            // Parse the embedded program starting from def_part
+                            if !def_part.starts_with("def ") {
+                                return Err("Expected 'def function_name' after 'with'".to_string());
                             }
+                            
+                            let function_name = def_part[4..].trim().to_string();
+                            let (instructions, end_index) = self.parse_block(lines, start_index + 1)?;
+                            
+                            let embedded_program = Program {
+                name: function_name,
+                instructions,
+                source_text: None, // Parser doesn't preserve original text
+            };
+                            
+                            return Ok((Instruction::CreateSquareWithProgram {
+                                x: x_expr,
+                                y: y_expr,
+                                program: embedded_program,
+                            }, end_index));
                         }
                     }
                 }
@@ -418,6 +467,52 @@ impl SimpleProgramParser {
     // Note: parse_reverse_sample_statement has been removed
     // Use 'set reverse ball_reference speed' syntax instead
     
+    fn parse_coordinate_expression(&self, coord_str: &str) -> Result<Expression, String> {
+        let coord_str = coord_str.trim();
+        
+        // Check for ball properties
+        if coord_str == "x" {
+            return Ok(Expression::BallProperty(BallProperty::X));
+        }
+        if coord_str == "y" {
+            return Ok(Expression::BallProperty(BallProperty::Y));
+        }
+        
+        // Check for arithmetic expressions like "x+1", "y-2", etc.
+        for op_char in ['+', '-', '*', '/', '%'] {
+            if let Some(op_pos) = coord_str.find(op_char) {
+                let left_str = coord_str[..op_pos].trim();
+                let right_str = coord_str[op_pos + 1..].trim();
+                
+                let left_expr = self.parse_coordinate_expression(left_str)?;
+                let right_expr = self.parse_coordinate_expression(right_str)?;
+                
+                let op = match op_char {
+                    '+' => BinaryOperator::Add,
+                    '-' => BinaryOperator::Sub,
+                    '*' => BinaryOperator::Mul,
+                    '/' => BinaryOperator::Div,
+                    '%' => BinaryOperator::Mod,
+                    _ => return Err(format!("Unsupported operator: {}", op_char)),
+                };
+                
+                return Ok(Expression::BinaryOp {
+                    left: Box::new(left_expr),
+                    op,
+                    right: Box::new(right_expr),
+                });
+            }
+        }
+        
+        // Try to parse as a literal number
+        if let Ok(num) = coord_str.parse::<f32>() {
+            return Ok(Expression::Literal(Value::Number(num)));
+        }
+        
+        // Try to parse as a variable
+        Ok(Expression::Variable(coord_str.to_string()))
+    }
+    
     fn parse_create_statement(&self, line: &str) -> Result<Instruction, String> {
         // Parse "create ball(3,14)(self,self)", "create square(3, 17)", or "create ball from sample library.sample_name(3,4)"
         let content = &line[7..].trim(); // Remove "create "
@@ -435,7 +530,8 @@ impl SimpleProgramParser {
                 // Parse coordinates
                 let coords: Vec<&str> = coords_str.split(',').map(|s| s.trim()).collect();
                 if coords.len() == 2 {
-                    if let (Ok(x), Ok(y)) = (coords[0].parse::<f32>(), coords[1].parse::<f32>()) {
+                    let x_expr = self.parse_coordinate_expression(coords[0])?;
+                    let y_expr = self.parse_coordinate_expression(coords[1])?;
                         match object_type {
                             "ball" => {
                                 // Check for speed and direction parameters or library references
@@ -449,8 +545,8 @@ impl SimpleProgramParser {
                                             let speed_expr = self.parse_speed_expression(params[0])?;
                                             let direction_expr = self.parse_direction_expression(params[1])?;
                                             return Ok(Instruction::CreateBall {
-                                                x: Expression::Literal(Value::Number(x)),
-                                                y: Expression::Literal(Value::Number(y)),
+                                                x: x_expr,
+                                                y: y_expr,
                                                 speed: speed_expr,
                                                 direction: direction_expr,
                                             });
@@ -460,14 +556,16 @@ impl SimpleProgramParser {
                                 } else if remaining.trim().starts_with("with") {
                                     // Check if it's a library reference like "with lib.ballcreator and lib.kick4.wav"
                                     if remaining.contains("lib.") {
-                                        return self.parse_create_with_library_reference("ball", x, y, remaining.trim());
+                                        // For library references, we need to evaluate expressions to get literal values
+                                        // This is a limitation - library references currently expect literal coordinates
+                                        return Err("Library references with dynamic coordinates not yet supported".to_string());
                                     }
                                     return Err("Invalid 'with' syntax for ball creation".to_string());
                                 } else {
                                     // Default values for backward compatibility
                                     return Ok(Instruction::CreateBall {
-                                        x: Expression::Literal(Value::Number(x)),
-                                        y: Expression::Literal(Value::Number(y)),
+                                        x: x_expr,
+                                        y: y_expr,
                                         speed: Expression::Literal(Value::Number(1.0)),
                                         direction: Expression::Literal(Value::Direction(Direction::Right)),
                                     });
@@ -479,7 +577,9 @@ impl SimpleProgramParser {
                                 if remaining.starts_with("with") {
                                     // Check if it's a library reference like "with lib.ballcreator and lib.kick4.wav"
                                     if remaining.contains("lib.") {
-                                        return self.parse_create_with_library_reference("square", x, y, remaining);
+                                        // For library references, we need to evaluate expressions to get literal values
+                                        // This is a limitation - library references currently expect literal coordinates
+                                        return Err("Library references with dynamic coordinates not yet supported".to_string());
                                     } else {
                                         // This indicates we have an embedded program, but we need to handle this
                                         // at a higher level since we need access to multiple lines
@@ -487,14 +587,15 @@ impl SimpleProgramParser {
                                     }
                                 } else {
                                     return Ok(Instruction::CreateSquare {
-                                        x: Expression::Literal(Value::Number(x)),
-                                        y: Expression::Literal(Value::Number(y)),
+                                        x: x_expr,
+                                        y: y_expr,
                                     });
                                 }
                             }
                             _ => return Err(format!("Unknown object type: {}", object_type)),
                         }
-                    }
+                } else {
+                    return Err("Invalid coordinate format. Expected: (x,y)".to_string());
                 }
             }
         }
@@ -921,6 +1022,14 @@ impl ProgramExecutor {
                     actions.push(ProgramAction::ExecuteLibraryFunction {
                         library_function: library_function.clone(),
                     });
+                }
+                Instruction::Return(function_name) => {
+                    actions.push(ProgramAction::Return(function_name.clone()));
+                    break; // Exit the instruction loop immediately
+                }
+                Instruction::End => {
+                    actions.push(ProgramAction::End);
+                    break; // Exit the instruction loop immediately
                 }
                 _ => {} // Handle other instructions as needed
             }

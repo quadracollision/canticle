@@ -28,6 +28,7 @@ impl LibraryBuilder {
         let program = Program {
             name: name.to_string(),
             instructions,
+            source_text: None, // Library functions don't preserve original text
         };
         self.functions.insert(name.to_string(), program);
         self

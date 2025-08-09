@@ -2,6 +2,7 @@ use winit::event::VirtualKeyCode;
 use crate::square::Program;
 use crate::programmer::SimpleProgramParser;
 use std::time::{Duration, Instant};
+use clipboard::{ClipboardProvider, ClipboardContext};
 
 #[derive(Clone, Debug)]
 pub struct ProgramEditor {
@@ -32,7 +33,7 @@ impl ProgramEditor {
                 "".to_string(),
             ],
             cursor_line: 0,
-            cursor_col: 0,
+            cursor_col: "def my_program".len(), // Position cursor at end of first line
             parser: SimpleProgramParser::new(),
             last_key_repeat: None,
             key_repeat_delay: Duration::from_millis(500),
@@ -42,22 +43,97 @@ impl ProgramEditor {
 
     pub fn new_with_text(text: Vec<String>) -> Self {
         let mut editor = Self::new();
-        editor.program_text = text;
+        editor.program_text = text.clone();
+        // Position cursor at end of first line if it exists
+        if !text.is_empty() {
+            editor.cursor_col = text[0].len();
+        }
         editor
+    }
+
+    pub fn new_empty() -> Self {
+        Self {
+            program_text: vec![
+                "def my_program".to_string(),
+                "".to_string(),
+            ],
+            cursor_line: 0,
+            cursor_col: "def my_program".len(), // Position cursor at end of first line
+            parser: SimpleProgramParser::new(),
+            last_key_repeat: None,
+            key_repeat_delay: Duration::from_millis(500),
+            key_repeat_rate: Duration::from_millis(100),
+        }
     }
 
     pub fn get_program(&self) -> Program {
         let program_source = self.program_text.join("\n");
         match self.parser.parse_program(&program_source) {
-            Ok(program) => program,
+            Ok(mut program) => {
+                program.source_text = Some(self.program_text.clone());
+                program
+            },
             Err(_) => {
-                // Return a default empty program if parsing fails
+                // Return a program with the raw text preserved, even if parsing fails
+                // This allows users to save work-in-progress code
+                let program_name = if let Some(first_line) = self.program_text.first() {
+                    if first_line.starts_with("def ") {
+                        first_line.strip_prefix("def ").unwrap_or("my_program").trim().to_string()
+                    } else {
+                        "my_program".to_string()
+                    }
+                } else {
+                    "my_program".to_string()
+                };
+                
                 Program {
-                    name: "default".to_string(),
-                    instructions: vec![],
+                    name: program_name,
+                    instructions: vec![], // Empty instructions but name is preserved
+                    source_text: Some(self.program_text.clone()), // Preserve source text
                 }
             }
         }
+    }
+    
+    /// Get all programs defined in the editor text
+    pub fn get_all_programs(&self) -> Vec<Program> {
+        let program_source = self.program_text.join("\n");
+        match self.parser.parse_multiple_programs(&program_source) {
+            Ok(mut programs) => {
+                // Add source text to all programs
+                for program in &mut programs {
+                    program.source_text = Some(self.program_text.clone());
+                }
+                programs
+            },
+            Err(error_msg) => {
+                // Instead of falling back, preserve the user's code with error comments
+                let mut commented_text = self.program_text.clone();
+                
+                // Add error comment at the top
+                commented_text.insert(0, format!("// SYNTAX ERROR: {}", error_msg));
+                commented_text.insert(1, "// Fix the error above to make this code functional".to_string());
+                commented_text.insert(2, "".to_string()); // Empty line for readability
+                
+                // Extract program name from the first def line if possible
+                let program_name = if let Some(def_line) = self.program_text.iter().find(|line| line.starts_with("def ")) {
+                    def_line.strip_prefix("def ").unwrap_or("my_program").trim().to_string()
+                } else {
+                    "my_program".to_string()
+                };
+                
+                // Return a program with preserved source text but empty instructions
+                vec![Program {
+                    name: program_name,
+                    instructions: vec![], // Empty instructions due to syntax error
+                    source_text: Some(commented_text), // Preserve source with error comments
+                }]
+            }
+        }
+    }
+    
+    pub fn get_program_text(&self) -> Vec<String> {
+        self.program_text.clone()
     }
 
     pub fn handle_input(&mut self, input: &winit_input_helper::WinitInputHelper) -> ProgramEditorAction {

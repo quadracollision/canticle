@@ -62,6 +62,8 @@ pub enum Instruction {
     ExecuteProgram(Program),
     ExecuteLibraryFunction { library_function: String },
     ContinueToNext, // Continue to next function in sequence
+    Return(Option<String>), // None = simple return, Some(name) = call function and return
+    End, // Natural end of block
     
     // Audio
     PlaySample(Expression),
@@ -101,6 +103,7 @@ use crate::ball::Ball;
 pub struct Program {
     pub instructions: Vec<Instruction>,
     pub name: String,
+    pub source_text: Option<Vec<String>>, // Preserve original source text for editing
 }
 
 // Library system for reusable components
@@ -238,6 +241,7 @@ impl LibraryManager {
         Ok((Program {
             name: function_name,
             instructions,
+            source_text: None,
         }, next_i))
     }
     
@@ -370,11 +374,13 @@ impl LibraryManager {
                     direction: Expression::Literal(Value::Direction(crate::ball::Direction::Right)),
                 }
             ],
+            source_text: None,
         });
         
         default_functions.functions.insert("bounce".to_string(), Program {
             name: "bounce".to_string(),
             instructions: vec![Instruction::Bounce],
+            source_text: None,
         });
         
         default_functions.functions.insert("speed_boost".to_string(), Program {
@@ -386,6 +392,7 @@ impl LibraryManager {
                     right: Box::new(Expression::Literal(Value::Number(1.5))),
                 }),
             ],
+            source_text: None,
         });
         
         default_functions.functions.insert("direction_cycle".to_string(), Program {
@@ -421,6 +428,7 @@ impl LibraryManager {
                     ]),
                 },
             ],
+            source_text: None,
         });
         
         self.add_function_library(default_functions);
@@ -494,6 +502,7 @@ impl Default for SquareProgram {
                 Program {
                     name: "Default".to_string(),
                     instructions: vec![Instruction::Bounce],
+                    source_text: None,
                 }
             ],
             hit_count: 0,
@@ -540,6 +549,12 @@ impl SquareProgram {
         self.programs.push(program);
     }
     
+    pub fn update_program(&mut self, index: usize, program: Program) {
+        if index < self.programs.len() {
+            self.programs[index] = program;
+        }
+    }
+    
     pub fn get_program(&self, index: usize) -> Option<&Program> {
         self.programs.get(index)
     }
@@ -550,6 +565,26 @@ impl SquareProgram {
     
     pub fn set_active_program(&mut self, index: Option<usize>) {
         self.active_program = index;
+    }
+    
+    pub fn replace_or_add_program(&mut self, program: Program) -> usize {
+        // If there's an active program and it's the default, replace it
+        if let Some(active_index) = self.active_program {
+            if let Some(existing_program) = self.programs.get(active_index) {
+                let is_default_program = existing_program.name == "Default" && 
+                    existing_program.instructions.len() == 1 &&
+                    matches!(existing_program.instructions[0], crate::square::Instruction::Bounce);
+                
+                if is_default_program {
+                    self.programs[active_index] = program;
+                    return active_index;
+                }
+            }
+        }
+        
+        // Otherwise, add as new program
+        self.programs.push(program);
+        self.programs.len() - 1
     }
     
     pub fn execute_program(&self, context: &mut ExecutionContext) -> Vec<ProgramAction> {
@@ -577,7 +612,7 @@ impl SquareProgram {
         }).collect()
     }
     
-    fn execute_instructions(&self, instructions: &[Instruction], context: &mut ExecutionContext) -> Vec<ProgramAction> {
+    pub fn execute_instructions(&self, instructions: &[Instruction], context: &mut ExecutionContext) -> Vec<ProgramAction> {
         let mut actions = Vec::new();
         
         for instruction in instructions {
@@ -776,6 +811,14 @@ impl SquareProgram {
                         library_function: library_function.clone() 
                     });
                 }
+                Instruction::Return(function_name) => {
+                    actions.push(ProgramAction::Return(function_name.clone()));
+                    break; // Exit the instruction loop immediately
+                }
+                Instruction::End => {
+                    actions.push(ProgramAction::End);
+                    break; // Exit the instruction loop immediately
+                }
             }
         }
         
@@ -864,6 +907,8 @@ pub enum ProgramAction {
     ExecuteProgram(Program),
     ExecuteLibraryFunction { library_function: String },
     ContinueToNext,
+    Return(Option<String>), // None = simple return, Some(name) = call function and return
+    End, // Natural end of block
     None,
 }
 

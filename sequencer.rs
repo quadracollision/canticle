@@ -517,6 +517,42 @@ impl SequencerGrid {
         self.library_manager.sample_libraries.remove("auto");
         self.log_to_console("Cleared auto-generated library".to_string());
     }
+    
+    /// Add an error comment to the program's source text to help users identify issues
+    fn add_error_comment_to_program(&mut self, grid_x: usize, grid_y: usize, error_msg: &str) {
+        if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+            let square_program = &mut self.cells[grid_y][grid_x].program;
+            if let Some(active_index) = square_program.active_program {
+                if let Some(program) = square_program.programs.get_mut(active_index) {
+                    if let Some(ref mut source_text) = program.source_text {
+                        // Check if this error comment already exists to avoid duplicates
+                        let error_comment = format!("// RUNTIME ERROR: {}", error_msg);
+                        if !source_text.iter().any(|line| line.contains(&error_comment)) {
+                            // Find the line with the problematic function call and add comment after it
+                            let mut found_error_line = false;
+                            for (i, line) in source_text.iter().enumerate() {
+                                if line.contains("return ") && error_msg.contains("Unknown function") {
+                                    // Extract function name from error message
+                                    if let Some(func_start) = error_msg.find("Unknown function: ") {
+                                        let func_name = &error_msg[func_start + 17..];
+                                        if line.contains(func_name) {
+                                            source_text.insert(i + 1, error_comment.clone());
+                                            found_error_line = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // If we couldn't find the specific line, add at the top
+                            if !found_error_line {
+                                source_text.insert(0, error_comment);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     pub fn resolve_ball_reference(&self, ball_reference: &str, current_square_x: usize, current_square_y: usize) -> Option<usize> {
         // Parse ball reference syntax: "last.c_red.self(-10)"
@@ -586,6 +622,9 @@ impl SequencerGrid {
             None
         };
         
+        // Collect error comments to add after ball iteration (to avoid borrowing conflicts)
+        let mut error_comments: Vec<(usize, usize, String)> = Vec::new();
+        
         for (ball_index, ball) in self.balls.iter_mut().enumerate() {
             if !ball.active {
                 continue;
@@ -651,6 +690,7 @@ impl SequencerGrid {
                                         
                                         // Check if any action requires ball position reset
                                         let mut should_reset_position = false;
+                                        let mut should_snap_to_grid_center = false;
                                         let mut explicit_bounce = false;
                                         
                                         // Apply program actions to the ball
@@ -661,10 +701,88 @@ impl SequencerGrid {
                                                     ball.speed = speed.max(0.1); // Ensure minimum speed
                                                     should_reset_position = true;
                                                 }
+                                                ProgramAction::Return(function_name) => {
+                                                    if let Some(ref func_name) = function_name {
+                                                        all_log_messages.push(format!("  → Return: calling function '{}'", func_name));
+                                                        
+                                                        // Look for the named function in the current square's programs
+                                                        let square_program = &self.cells[grid_y][grid_x].program;
+                                                        let mut found_function = None;
+                                                        
+                                                        for program in &square_program.programs {
+                                                            if program.name == *func_name {
+                                                                found_function = Some(program.clone());
+                                                                break;
+                                                            }
+                                                        }
+                                                        
+                                                        if let Some(target_program) = found_function {
+                                                            all_log_messages.push(format!("    Executing function: {}", func_name));
+                                                            
+                                                            // Execute the target function's instructions
+                                                            let mut context = crate::square::ExecutionContext {
+                                                                variables: std::collections::HashMap::new(),
+                                                                ball_hit_count: 0,
+                                                                square_hit_count: 0,
+                                                                ball_x: ball.x,
+                                                                ball_y: ball.y,
+                                                                ball_speed: ball.speed,
+                                                                ball_direction: ball.direction,
+                                                            };
+                                                            
+                                                            // Create a temporary SquareProgram to execute the function
+                                                            let mut temp_square_program = crate::square::SquareProgram::new();
+                                                            let function_actions = temp_square_program.execute_instructions(&target_program.instructions, &mut context);
+                                                            
+                                                            // Apply the actions from the function
+                                                            for function_action in function_actions {
+                                                                match function_action {
+                                                                    ProgramAction::CreateBall { x, y, speed, direction } => {
+                                                                        all_log_messages.push(format!("    Function creating ball at ({}, {})", x, y));
+                                                                        create_ball_actions.push((x, y, speed, direction));
+                                                                    }
+                                                                    ProgramAction::CreateSquare { x, y } => {
+                                                                        all_log_messages.push(format!("    Function creating square at ({}, {})", x, y));
+                                                                        create_square_actions.push((x, y));
+                                                                    }
+                                                                    ProgramAction::SetSpeed(speed) => {
+                                                                        all_log_messages.push(format!("    Function setting speed: {}", speed));
+                                                                        ball.speed = speed.max(0.1);
+                                                                        should_reset_position = true;
+                                                                    }
+                                                                    ProgramAction::SetDirection(direction) => {
+                                                                        all_log_messages.push(format!("    Function setting direction: {:?}", direction));
+                                                                        ball.direction = direction;
+                                                                        should_snap_to_grid_center = true;
+                                                                    }
+                                                                    ProgramAction::Bounce => {
+                                                                        all_log_messages.push("    Function bouncing".to_string());
+                                                                        ball.reverse_direction();
+                                                                        should_reset_position = true;
+                                                                        explicit_bounce = true;
+                                                                    }
+                                                                    // Handle other actions as needed
+                                                                    _ => {
+                                                                        all_log_messages.push(format!("    Function action: {:?}", function_action));
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            all_log_messages.push(format!("    Unknown function: {}", func_name));
+                                                            // Collect error info to add comment later (after ball iteration)
+                                                            error_comments.push((grid_x, grid_y, format!("Unknown function: {}", func_name)));
+                                                        }
+                                                    } else {
+                                                        all_log_messages.push("  → Return: simple return".to_string());
+                                                    }
+                                                }
+                                                ProgramAction::End => {
+                                                    all_log_messages.push("  → End: natural block termination".to_string());
+                                                }
                                                 ProgramAction::SetDirection(direction) => {
                                                     all_log_messages.push(format!("  → SetDirection: {:?}", direction));
                                                     ball.direction = direction;
-                                                    should_reset_position = true;
+                                                    should_snap_to_grid_center = true;
                                                 }
                                                 ProgramAction::Bounce => {
                                                     all_log_messages.push("  → Bounce".to_string());
@@ -808,12 +926,13 @@ impl SequencerGrid {
                                                 ProgramAction::ExecuteLibraryFunction { library_function } => {
                                                     all_log_messages.push(format!("  → ExecuteLibraryFunction: {}", library_function));
                                                     
-                                                    // Parse the library function call (e.g., "lib.new_program")
-                                                    if library_function.starts_with("lib.") {
-                                                        let function_name = &library_function[4..]; // Remove "lib." prefix
+                                                    // Parse the library function call (e.g., "lib.function_name" or "auto.test")
+                                                    if let Some(dot_pos) = library_function.find('.') {
+                                                        let library_name = &library_function[..dot_pos];
+                                                        let function_name = &library_function[dot_pos + 1..];
                                                         
                                                         // Get the library function program and execute it
-                                                        if let Some(library_program) = self.library_manager.get_function("lib", function_name) {
+                                                        if let Some(library_program) = self.library_manager.get_function(library_name, function_name) {
                                                             all_log_messages.push(format!("    Executing library function: {}", function_name));
                                                             
                                                             // Execute the library function's instructions
@@ -826,30 +945,110 @@ impl SequencerGrid {
                                                                 ball_speed: ball.speed,
                                                                 ball_direction: ball.direction,
                                                             };
-                                                            let library_actions = library_program.execute_instructions(&library_program.instructions, &mut context);
+                                                            // Create a temporary SquareProgram to execute the library function
+                                                            let mut temp_square_program = crate::square::SquareProgram::new();
+                                                            let library_actions = temp_square_program.execute_instructions(&library_program.instructions, &mut context);
                                                             
                                                             // Apply the actions from the library function
-                                                            for library_action in library_actions {
-                                                                match library_action {
-                                                                    ProgramAction::CreateBall { x, y, speed, direction } => {
-                                                                        all_log_messages.push(format!("    Library function creating ball at ({}, {})", x, y));
-                                                                        create_ball_actions.push((x, y, speed, direction));
-                                                                    }
-                                                                    ProgramAction::CreateSquare { x, y } => {
-                                                                        all_log_messages.push(format!("    Library function creating square at ({}, {})", x, y));
-                                                                        create_square_actions.push((x, y));
-                                                                    }
-                                                                    // Handle other actions as needed
-                                                                    _ => {
-                                                                        all_log_messages.push(format!("    Library function action: {:?}", library_action));
-                                                                    }
+                                            for library_action in library_actions {
+                                                match library_action {
+                                                    ProgramAction::CreateBall { x, y, speed, direction } => {
+                                                        all_log_messages.push(format!("    Library function creating ball at ({}, {})", x, y));
+                                                        create_ball_actions.push((x, y, speed, direction));
+                                                    }
+                                                    ProgramAction::CreateSquare { x, y } => {
+                                                        all_log_messages.push(format!("    Library function creating square at ({}, {})", x, y));
+                                                        create_square_actions.push((x, y));
+                                                    }
+                                                    ProgramAction::Return(function_name) => {
+                                                        if let Some(ref func_name) = function_name {
+                                                            all_log_messages.push(format!("    Library function return: calling function '{}'", func_name));
+                                                            
+                                                            // Look for the named function in the current square's programs
+                                                            let square_program = &self.cells[grid_y][grid_x].program;
+                                                            let mut found_function = None;
+                                                            
+                                                            for program in &square_program.programs {
+                                                                if program.name == *func_name {
+                                                                    found_function = Some(program.clone());
+                                                                    break;
                                                                 }
                                                             }
+                                                            
+                                                            if let Some(target_program) = found_function {
+                                                                all_log_messages.push(format!("      Executing function: {}", func_name));
+                                                                
+                                                                // Execute the target function's instructions
+                                                                let mut context = crate::square::ExecutionContext {
+                                                                    variables: std::collections::HashMap::new(),
+                                                                    ball_hit_count: 0,
+                                                                    square_hit_count: 0,
+                                                                    ball_x: ball.x,
+                                                                    ball_y: ball.y,
+                                                                    ball_speed: ball.speed,
+                                                                    ball_direction: ball.direction,
+                                                                };
+                                                                
+                                                                // Create a temporary SquareProgram to execute the function
+                                                                let mut temp_square_program = crate::square::SquareProgram::new();
+                                                                let function_actions = temp_square_program.execute_instructions(&target_program.instructions, &mut context);
+                                                                
+                                                                // Apply the actions from the function
+                                                                for function_action in function_actions {
+                                                                    match function_action {
+                                                                        ProgramAction::CreateBall { x, y, speed, direction } => {
+                                                                            all_log_messages.push(format!("      Function creating ball at ({}, {})", x, y));
+                                                                            create_ball_actions.push((x, y, speed, direction));
+                                                                        }
+                                                                        ProgramAction::CreateSquare { x, y } => {
+                                                                            all_log_messages.push(format!("      Function creating square at ({}, {})", x, y));
+                                                                            create_square_actions.push((x, y));
+                                                                        }
+                                                                        ProgramAction::SetSpeed(speed) => {
+                                                                            all_log_messages.push(format!("      Function setting speed: {}", speed));
+                                                                            ball.speed = speed.max(0.1);
+                                                                            should_reset_position = true;
+                                                                        }
+                                                                        ProgramAction::SetDirection(direction) => {
+                                                                            all_log_messages.push(format!("      Function setting direction: {:?}", direction));
+                                                                            ball.direction = direction;
+                                                                            should_snap_to_grid_center = true;
+                                                                        }
+                                                                        ProgramAction::Bounce => {
+                                                                            all_log_messages.push("      Function bouncing".to_string());
+                                                                            ball.reverse_direction();
+                                                                            should_reset_position = true;
+                                                                            explicit_bounce = true;
+                                                                        }
+                                                                        // Handle other actions as needed
+                                                                        _ => {
+                                                                            all_log_messages.push(format!("      Function action: {:?}", function_action));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                all_log_messages.push(format!("      Unknown function: {}", func_name));
+                                                                // Collect error info to add comment later (after ball iteration)
+                                                                error_comments.push((grid_x, grid_y, format!("Unknown function: {}", func_name)));
+                                                            }
                                                         } else {
-                                                            all_log_messages.push(format!("    Failed to find library function: {}", function_name));
+                                                            all_log_messages.push("    Library function return: simple return".to_string());
+                                                        }
+                                                    }
+                                                    ProgramAction::End => {
+                                                        all_log_messages.push("    Library function end: natural block termination".to_string());
+                                                    }
+                                                    // Handle other actions as needed
+                                                    _ => {
+                                                        all_log_messages.push(format!("    Library function action: {:?}", library_action));
+                                                    }
+                                                }
+                                            }
+                                                        } else {
+                                                            all_log_messages.push(format!("    Failed to find library function: {}.{}", library_name, function_name));
                                                         }
                                                     } else {
-                                                        all_log_messages.push(format!("    Invalid library function format: {}", library_function));
+                                                        all_log_messages.push(format!("    Invalid library function format: {} (expected library.function)", library_function));
                                                     }
                                                 }
                                                 _ => {
@@ -864,9 +1063,15 @@ impl SequencerGrid {
                                             should_reset_position = true;
                                         }
                                         
-                                        // Reset position if the action affects ball movement or if we bounced
-                                        if should_reset_position {
-                                            // Move ball back to previous position to prevent overlap
+                                        // Reset position based on action type
+                                        if should_snap_to_grid_center {
+                                            // Snap ball to center of current grid cell for SetDirection
+                                            ball.x = grid_x as f32 + 0.5;
+                                            ball.y = grid_y as f32 + 0.5;
+                                            ball.last_grid_x = grid_x;
+                                            ball.last_grid_y = grid_y;
+                                        } else if should_reset_position {
+                                            // Move ball back to previous position for other actions
                                             ball.x = old_x;
                                             ball.y = old_y;
                                             ball.last_grid_x = old_x.floor() as usize;
@@ -937,6 +1142,11 @@ impl SequencerGrid {
             } else {
                 eprintln!("Could not resolve ball reference: {}", ball_reference);
             }
+        }
+        
+        // Process collected error comments after ball iteration
+        for (grid_x, grid_y, error_msg) in error_comments {
+            self.add_error_comment_to_program(grid_x, grid_y, &error_msg);
         }
         
         // Process create/destroy actions after the mutable iteration
@@ -1141,16 +1351,62 @@ impl SequencerUI {
 
             // Handle square menu input
             if self.grid.square_menu.is_open() {
-                if let Some(action) = self.grid.square_menu.handle_input(&self.input) {
+                if let Some(action) = self.grid.square_menu.handle_input(&self.input, &self.grid.cells) {
                     match action {
-                        SquareMenuAction::SaveProgram { square_x, square_y, program } => {
+                        SquareMenuAction::SaveProgram { square_x, square_y, program, program_index } => {
                             if square_x < GRID_WIDTH && square_y < GRID_HEIGHT {
-                                self.grid.cells[square_y][square_x].program.add_program(program.clone());
-                                // Set the newly added program as active
-                                let program_count = self.grid.cells[square_y][square_x].program.programs.len();
-                                self.grid.cells[square_y][square_x].program.set_active_program(Some(program_count - 1));
+                                let square_program = &mut self.grid.cells[square_y][square_x].program;
+                                
+                                if let Some(index) = program_index {
+                                    // Update existing program
+                                    square_program.update_program(index, program.clone());
+                                    square_program.set_active_program(Some(index));
+                                } else {
+                                    // Add new program
+                                    square_program.add_program(program.clone());
+                                    let program_count = square_program.programs.len();
+                                    square_program.set_active_program(Some(program_count - 1));
+                                }
+                                
                                 // Automatically add program to library
                                 self.grid.auto_add_program_to_library(&program);
+                            }
+                        }
+                        SquareMenuAction::SaveMultiplePrograms { square_x, square_y, programs, program_index } => {
+                            if square_x < GRID_WIDTH && square_y < GRID_HEIGHT {
+                                // First, handle the square program operations
+                                {
+                                    let square_program = &mut self.grid.cells[square_y][square_x].program;
+                                    
+                                    if let Some(index) = program_index {
+                                        // Replace existing program with the first one, then add the rest
+                                        if !programs.is_empty() {
+                                            square_program.update_program(index, programs[0].clone());
+                                            square_program.set_active_program(Some(index));
+                                            
+                                            // Add remaining programs as new programs
+                                            for program in programs.iter().skip(1) {
+                                                square_program.add_program(program.clone());
+                                            }
+                                        }
+                                    } else {
+                                        // Add all programs as new programs
+                                        for (i, program) in programs.iter().enumerate() {
+                                            square_program.add_program(program.clone());
+                                            
+                                            // Set the first program as active
+                                            if i == 0 {
+                                                let program_count = square_program.programs.len();
+                                                square_program.set_active_program(Some(program_count - 1));
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Then, add all programs to library (after square_program borrow is released)
+                                for program in &programs {
+                                    self.grid.auto_add_program_to_library(program);
+                                }
                             }
                         }
                         SquareMenuAction::TestProgram { square_x, square_y } => {
@@ -1265,9 +1521,25 @@ impl SequencerUI {
                 self.grid.clear_cell(self.grid.cursor.x, self.grid.cursor.y);
             }
             
-            // Context menu for balls
+            // Context menu for balls or library for empty tiles
             if self.input.key_pressed(VirtualKeyCode::Space) {
-                self.grid.open_context_menu(self.grid.cursor.x, self.grid.cursor.y);
+                let cursor_x = self.grid.cursor.x;
+                let cursor_y = self.grid.cursor.y;
+                
+                // Check if there's a ball at cursor position
+                let has_ball = self.grid.get_ball_at(cursor_x, cursor_y).is_some();
+                
+                // Check if there's a square at cursor position
+                let has_square = cursor_x < GRID_WIDTH && cursor_y < GRID_HEIGHT && 
+                                self.grid.cells[cursor_y][cursor_x].content == CellContent::Square;
+                
+                if has_ball || has_square {
+                    // Open context menu for balls or squares
+                    self.grid.open_context_menu(cursor_x, cursor_y);
+                } else {
+                    // Open library for empty tiles
+                    self.grid.library_gui.toggle();
+                }
             }
             
             // Square programming menu (R key)

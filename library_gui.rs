@@ -94,7 +94,7 @@ impl LibraryGui {
         self.state = match self.state {
             LibraryGuiState::Hidden => LibraryGuiState::Visible {
                 selected_column: LibraryColumn::Samples,
-                selected_library: "auto".to_string(),
+                selected_library: "lib".to_string(),
                 selected_item: 0,
                 scroll_offset: 0,
                 editing_mode: None,
@@ -144,6 +144,22 @@ impl LibraryGui {
             };
             selected_item = 0;
             scroll_offset = 0;
+        }
+
+        // Library switching with Left/Right arrows
+        if input.key_pressed(VirtualKeyCode::Left) || input.key_pressed(VirtualKeyCode::Right) {
+            let available_libraries: Vec<String> = library_manager.function_libraries.keys().cloned().collect();
+            if !available_libraries.is_empty() {
+                let current_index = available_libraries.iter().position(|lib| lib == &selected_library).unwrap_or(0);
+                let new_index = if input.key_pressed(VirtualKeyCode::Left) {
+                    if current_index == 0 { available_libraries.len() - 1 } else { current_index - 1 }
+                } else {
+                    (current_index + 1) % available_libraries.len()
+                };
+                selected_library = available_libraries[new_index].clone();
+                selected_item = 0;
+                scroll_offset = 0;
+            }
         }
 
         // Navigation within column
@@ -275,7 +291,7 @@ impl LibraryGui {
                         let program = editor.get_program();
                         let action = Some(LibraryGuiAction::CreateProgram {
                             library_name: selected_library.to_string(),
-                            name: name.clone(),
+                            name: program.name.clone(),
                             program,
                         });
                         if let LibraryGuiState::Visible { editing_mode, .. } = &mut self.state {
@@ -295,7 +311,7 @@ impl LibraryGui {
                     ProgramEditorAction::SaveProgram(program) => {
                         let action = Some(LibraryGuiAction::CreateProgram {
                             library_name: selected_library.to_string(),
-                            name: name.clone(),
+                            name: program.name.clone(),
                             program,
                         });
                         if let LibraryGuiState::Visible { editing_mode, .. } = &mut self.state {
@@ -427,12 +443,13 @@ impl LibraryGui {
     fn collect_all_programs(&self, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Vec<ProgramEntry> {
         let mut all_programs = Vec::new();
         
-        // Skip default libraries (lib, default) to avoid showing predefined programs
+        // Include all libraries, including "lib" for user-created programs
         for (lib_name, lib) in &library_manager.function_libraries {
-            if lib_name == "lib" || lib_name == "default" {
-                continue;
-            }
             for (prog_name, program) in &lib.functions {
+                // Skip only the default predefined functions, not user-created ones
+                if lib_name == "lib" && self.is_predefined_function(prog_name) {
+                    continue;
+                }
                 all_programs.push(ProgramEntry {
                     name: prog_name.clone(),
                     program: program.clone(),
@@ -441,11 +458,17 @@ impl LibraryGui {
             }
         }
         
-        // Collect programs from squares
+        // Collect programs from squares, but skip the default "Default" program
         for (y, row) in grid.iter().enumerate() {
             for (x, cell) in row.iter().enumerate() {
                 if cell.is_square() {
                     for (prog_index, program) in cell.program.programs.iter().enumerate() {
+                        // Skip the default "Default" program that contains only a bounce instruction
+                        if program.name == "Default" && program.instructions.len() == 1 {
+                            if let crate::square::Instruction::Bounce = program.instructions[0] {
+                                continue;
+                            }
+                        }
                         all_programs.push(ProgramEntry {
                             name: program.name.clone(),
                             program: program.clone(),
@@ -464,6 +487,11 @@ impl LibraryGui {
             .get(library_name)?
             .functions
             .get(program_name)
+    }
+
+    fn is_predefined_function(&self, program_name: &str) -> bool {
+        // List of predefined function names that should be hidden from the UI
+        matches!(program_name, "ballcreator" | "bounce" | "speed_boost" | "direction_cycle" | "multi_creator")
     }
 
     fn program_to_source_code(&self, program: &Program) -> Vec<String> {
