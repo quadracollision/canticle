@@ -1,7 +1,7 @@
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -21,6 +21,14 @@ pub enum AudioError {
 
 pub type Result<T> = std::result::Result<T, AudioError>;
 
+// Cached audio sample data
+#[derive(Clone)]
+pub struct CachedSample {
+    pub data: Vec<u8>,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
 #[derive(Clone)]
 pub struct AudioChannel {
     pub id: u32,
@@ -28,17 +36,31 @@ pub struct AudioChannel {
     pub volume: f32,
     pub muted: bool,
     sink: Arc<Sink>,
+    // Pool of additional sinks for simultaneous playback
+    sink_pool: Vec<Arc<Sink>>,
+    pool_index: usize,
 }
 
 impl AudioChannel {
     pub fn new(id: u32, name: String, stream_handle: &OutputStreamHandle) -> Self {
         let sink = Arc::new(Sink::try_new(stream_handle).unwrap());
+        
+        // Create a pool of sinks for simultaneous playback
+        let mut sink_pool = Vec::new();
+        for _ in 0..8 { // Pool of 8 sinks per channel
+            if let Ok(pool_sink) = Sink::try_new(stream_handle) {
+                sink_pool.push(Arc::new(pool_sink));
+            }
+        }
+        
         Self {
             id,
             name,
             volume: 1.0,
             muted: false,
             sink,
+            sink_pool,
+            pool_index: 0,
         }
     }
     
@@ -51,7 +73,15 @@ impl AudioChannel {
         let source = Decoder::new(BufReader::new(file))?;
         let amplified_source = source.amplify(self.volume);
         
-        // Stop any currently playing sound and play the new one immediately
+        // Try to find an available sink in the pool for simultaneous playback
+        for sink in &self.sink_pool {
+            if sink.empty() {
+                sink.append(amplified_source);
+                return Ok(());
+            }
+        }
+        
+        // If no sink is available, use the main sink (this will interrupt current playback)
         self.sink.stop();
         self.sink.append(amplified_source);
         Ok(())
@@ -94,6 +124,10 @@ pub struct AudioEngine {
     channels: Arc<Mutex<HashMap<u32, AudioChannel>>>,
     next_channel_id: u32,
     master_volume: f32,
+    // Sample cache to avoid repeated file I/O
+    sample_cache: Arc<Mutex<HashMap<String, CachedSample>>>,
+    // Performance monitoring
+    active_samples: Arc<Mutex<u32>>,
 }
 
 impl AudioEngine {
@@ -106,6 +140,8 @@ impl AudioEngine {
             channels: Arc::new(Mutex::new(HashMap::new())),
             next_channel_id: 0,
             master_volume: 1.0,
+            sample_cache: Arc::new(Mutex::new(HashMap::new())),
+            active_samples: Arc::new(Mutex::new(0)),
         })
     }
     
@@ -123,13 +159,38 @@ impl AudioEngine {
     }
     
     pub fn play_on_channel(&self, channel_id: u32, file_path: &str) -> Result<()> {
+        // Increment active sample counter for performance monitoring
+        {
+            let mut active = self.active_samples.lock().unwrap();
+            *active += 1;
+            
+            // Log warning if too many samples are playing simultaneously
+            if *active > 10 {
+                log::warn!("High audio load: {} samples playing simultaneously", *active);
+            }
+        }
+        
         let channels = self.channels.lock().unwrap();
         let channel = channels.get(&channel_id)
             .ok_or(AudioError::ChannelNotFound(channel_id))?;
         
         channel.play_file(file_path)?;
-        log::info!("Playing {} on channel {}", file_path, channel_id);
+        log::info!("Playing {} on channel {} (active samples: {})", 
+                  file_path, channel_id, self.get_active_sample_count());
         Ok(())
+    }
+    
+    pub fn play_reverse_on_channel(&self, channel_id: u32, file_path: &str, speed: f32) -> Result<()> {
+        // For now, this is a placeholder that plays the sample normally
+        // TODO: Implement actual reverse playback with speed control
+        let channels = self.channels.lock().unwrap();
+        if let Some(channel) = channels.get(&channel_id) {
+            // Log the reverse playback request for debugging
+            println!("Reverse sample playback requested: {} at speed {}", file_path, speed);
+            channel.play_file(file_path)
+        } else {
+            Err(AudioError::ChannelNotFound(channel_id))
+        }
     }
     
     pub fn set_channel_volume(&self, channel_id: u32, volume: f32) -> Result<()> {
@@ -204,6 +265,78 @@ impl AudioEngine {
         channels.values()
             .map(|ch| (ch.id, ch.name.clone(), ch.is_empty()))
             .collect()
+    }
+    
+    // Performance monitoring methods
+    pub fn get_active_sample_count(&self) -> u32 {
+        let active = self.active_samples.lock().unwrap();
+        *active
+    }
+    
+    pub fn cleanup_finished_samples(&self) {
+        // Decrement counter for finished samples
+        let channels = self.channels.lock().unwrap();
+        let mut finished_count = 0;
+        
+        for channel in channels.values() {
+            // Count finished sinks in the pool
+            for sink in &channel.sink_pool {
+                if sink.empty() {
+                    finished_count += 1;
+                }
+            }
+            if channel.sink.empty() {
+                finished_count += 1;
+            }
+        }
+        
+        // Update active sample counter (conservative approach)
+        let mut active = self.active_samples.lock().unwrap();
+        if *active > 0 {
+            *active = (*active).saturating_sub(finished_count / 10); // Conservative cleanup
+        }
+    }
+    
+    // Cache management for better performance
+    pub fn preload_sample(&self, file_path: &str) -> Result<()> {
+        let path_key = file_path.to_string();
+        
+        // Check if already cached
+        {
+            let cache = self.sample_cache.lock().unwrap();
+            if cache.contains_key(&path_key) {
+                return Ok(());
+            }
+        }
+        
+        // Load and cache the sample
+        let file = File::open(file_path)?;
+        let mut reader = BufReader::new(file);
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        
+        let cached_sample = CachedSample {
+            data,
+            sample_rate: 44100, // Default, could be extracted from file
+            channels: 2,        // Default stereo
+        };
+        
+        let mut cache = self.sample_cache.lock().unwrap();
+        cache.insert(path_key, cached_sample);
+        
+        log::info!("Preloaded sample: {}", file_path);
+        Ok(())
+    }
+    
+    pub fn clear_sample_cache(&self) {
+        let mut cache = self.sample_cache.lock().unwrap();
+        cache.clear();
+        log::info!("Sample cache cleared");
+    }
+    
+    pub fn get_cache_size(&self) -> usize {
+        let cache = self.sample_cache.lock().unwrap();
+        cache.len()
     }
 }
 

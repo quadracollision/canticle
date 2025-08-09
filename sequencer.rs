@@ -7,18 +7,41 @@ use winit_input_helper::WinitInputHelper;
 use rfd::FileDialog;
 
 use crate::ball::{Ball, Direction};
-use crate::square::{Cell, CellContent, ProgramAction};
+use crate::square::{Cell, CellContent, ProgramAction, DestroyTarget, LibraryManager};
 use crate::context_menu::{ContextMenu, ContextMenuAction};
 use crate::square_menu::{SquareContextMenu, SquareMenuAction};
 use crate::programmer::ProgramExecutor;
 use crate::audio_engine::AudioEngine;
+use crate::library_gui::{LibraryGui, LibraryGuiAction};
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::io::Write;
+
+#[derive(Clone, Debug)]
+pub struct CollisionEvent {
+    pub ball_index: usize,
+    pub ball_color: String,
+    pub square_x: usize,
+    pub square_y: usize,
+    pub timestamp: std::time::Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct CollisionCooldown {
+    pub ball_index: usize,
+    pub square_x: usize,
+    pub square_y: usize,
+    pub last_collision: std::time::Instant,
+}
 
 
 pub const GRID_WIDTH: usize = 16;
 pub const GRID_HEIGHT: usize = 12;
 const CELL_SIZE: usize = 40;
+const CONSOLE_HEIGHT: usize = 150;
 const WINDOW_WIDTH: usize = GRID_WIDTH * CELL_SIZE;
-const WINDOW_HEIGHT: usize = GRID_HEIGHT * CELL_SIZE;
+const WINDOW_HEIGHT: usize = GRID_HEIGHT * CELL_SIZE + CONSOLE_HEIGHT;
+const GRID_AREA_HEIGHT: usize = GRID_HEIGHT * CELL_SIZE;
 
 pub struct Cursor {
     pub x: usize,
@@ -63,20 +86,64 @@ pub struct SequencerGrid {
     pub square_menu: SquareContextMenu,
     pub program_executor: ProgramExecutor,
     pub selected_ball: Option<usize>,
+    pub collision_history: VecDeque<CollisionEvent>,
+    pub audio_engine: AudioEngine,
+    pub console_messages: VecDeque<String>,
+    pub collision_cooldowns: Vec<CollisionCooldown>,
+    pub library_manager: LibraryManager,
+    pub library_gui: LibraryGui,
+    // State tracking for reset functionality
+    pub original_cells: [[Cell; GRID_WIDTH]; GRID_HEIGHT],
+    pub original_balls: Vec<Ball>,
 }
 
 impl SequencerGrid {
-    pub fn new() -> Self {
+    pub fn new(audio_engine: AudioEngine) -> Self {
+        let initial_cells = std::array::from_fn(|_| std::array::from_fn(|_| Cell::default()));
         Self {
-            cells: std::array::from_fn(|_| std::array::from_fn(|_| Cell::default())),
+            cells: initial_cells.clone(),
             cursor: Cursor::new(),
             balls: Vec::new(),
             context_menu: ContextMenu::new(),
             square_menu: SquareContextMenu::new(),
             program_executor: ProgramExecutor::new(),
             selected_ball: None,
+            collision_history: VecDeque::new(),
+            audio_engine,
+            console_messages: VecDeque::new(),
+            collision_cooldowns: Vec::new(),
+            library_manager: LibraryManager::new(),
+            library_gui: LibraryGui::new(),
+            // Initialize original state
+            original_cells: initial_cells,
+            original_balls: Vec::new(),
         }
     }
+    
+    pub fn log_to_console(&mut self, message: String) {
+        // Add timestamp to message
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let formatted_message = format!("[{}] {}", timestamp, message);
+        
+        // Add to console (keep only last 10 messages)
+        self.console_messages.push_back(formatted_message.clone());
+        if self.console_messages.len() > 10 {
+            self.console_messages.pop_front();
+        }
+        
+        // Write to file
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("parser_log.txt") {
+            let _ = writeln!(file, "{}", formatted_message);
+        }
+    }
+    
+
     
     pub fn place_square(&mut self, x: usize, y: usize) {
         if x < GRID_WIDTH && y < GRID_HEIGHT {
@@ -138,7 +205,17 @@ impl SequencerGrid {
     
     pub fn set_ball_sample(&mut self, ball_index: usize, sample_path: String) {
         if ball_index < self.balls.len() {
-            self.balls[ball_index].set_sample(sample_path);
+            self.balls[ball_index].set_sample(sample_path.clone());
+            
+            // Preload the sample for better performance
+            if let Err(e) = self.audio_engine.preload_sample(&sample_path) {
+                self.log_to_console(format!("Warning: Failed to preload sample {}: {}", sample_path, e));
+            } else {
+                self.log_to_console(format!("Preloaded sample: {}", sample_path));
+            }
+            
+            // Automatically add sample to library
+            self.auto_add_sample_to_library(&sample_path, "ball");
         }
     }
     
@@ -164,18 +241,350 @@ impl SequencerGrid {
         let any_active = self.balls.iter().any(|ball| ball.active);
         
         if any_active {
-            // If any balls are active, reset all to original positions and stop them
-            self.reset_balls_to_origin();
+            // If any balls are active, reset to original state
+            self.reset_to_original_state();
         } else {
-            // If no balls are active, start all balls moving
+            // If no balls are active, save current state as original and start balls
+            self.save_current_state_as_original();
             for ball in &mut self.balls {
                 ball.activate();
             }
         }
+        
+        // Reset all hit counts when toggling ball states
+        self.program_executor.reset_all_hit_counts();
+    }
+    
+    pub fn save_current_state_as_original(&mut self) {
+        // Save current grid state as the original state
+        self.original_cells = self.cells.clone();
+        self.original_balls = self.balls.clone();
+        self.log_to_console("Current state saved as original".to_string());
+    }
+    
+    pub fn reset_to_original_state(&mut self) {
+        // Restore grid to original state
+        self.cells = self.original_cells.clone();
+        self.balls = self.original_balls.clone();
+        
+        // Reset all balls to their original positions and stop them
+        for ball in &mut self.balls {
+            ball.reset_to_original();
+        }
+        
+        // Clear collision history and cooldowns
+        self.collision_history.clear();
+        self.collision_cooldowns.clear();
+        
+        self.log_to_console("Grid reset to original state".to_string());
+    }
+    
+    pub fn find_last_ball_collision(&self, ball_color: &str, square_x: usize, square_y: usize) -> Option<usize> {
+        // Find the most recent collision of a ball with the specified color hitting the specified square
+        self.collision_history
+            .iter()
+            .rev() // Start from most recent
+            .find(|event| {
+                event.ball_color == ball_color && 
+                event.square_x == square_x && 
+                event.square_y == square_y
+            })
+            .map(|event| event.ball_index)
+    }
+    
+    // Automatically add sample template to library when used in creation
+    pub fn auto_add_sample_template_to_library(&mut self, sample_template: &crate::square::SampleTemplate, sample_type: &str) {
+        use crate::square::SampleLibrary;
+        
+        // Check if sample already exists in auto library
+        if self.library_manager.get_sample_template("auto", &sample_template.name).is_some() {
+            return; // Already exists
+        }
+        
+        // Get or create auto library
+        if !self.library_manager.sample_libraries.contains_key("auto") {
+            let auto_library = SampleLibrary {
+                name: "auto".to_string(),
+                samples: std::collections::HashMap::new(),
+                description: "Automatically generated samples from loaded files".to_string(),
+            };
+            self.library_manager.add_sample_library(auto_library);
+        }
+        
+        // Add sample to auto library
+        if let Some(auto_lib) = self.library_manager.sample_libraries.get_mut("auto") {
+            auto_lib.samples.insert(sample_template.name.clone(), sample_template.clone());
+            self.log_to_console(format!("Auto-added sample template '{}' to library for {}", sample_template.name, sample_type));
+        }
+    }
+    
+    // Automatically add sample to library when loaded into ball or square
+    pub fn auto_add_sample_to_library(&mut self, sample_path: &str, sample_type: &str) {
+        use crate::square::{SampleTemplate, SampleLibrary};
+        use crate::ball::Direction;
+        use std::path::Path;
+        
+        // Extract filename without extension as sample name
+        let sample_name = Path::new(sample_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        
+        // Check if sample already exists in auto library
+        if self.library_manager.get_sample_template("auto", &sample_name).is_some() {
+            return; // Already exists
+        }
+        
+        // Create sample template with defaults
+        let sample_template = SampleTemplate {
+            name: sample_name.clone(),
+            default_speed: 2.0,
+            default_direction: Direction::Up,
+            color: if sample_type == "ball" { "white".to_string() } else { "gray".to_string() },
+            behavior_program: None,
+        };
+        
+        // Get or create auto library
+        if !self.library_manager.sample_libraries.contains_key("auto") {
+            let auto_library = SampleLibrary {
+                name: "auto".to_string(),
+                samples: std::collections::HashMap::new(),
+                description: "Automatically generated samples from loaded files".to_string(),
+            };
+            self.library_manager.add_sample_library(auto_library);
+        }
+        
+        // Add sample to auto library
+        if let Some(auto_lib) = self.library_manager.sample_libraries.get_mut("auto") {
+            auto_lib.samples.insert(sample_name.clone(), sample_template);
+            self.log_to_console(format!("Auto-added sample '{}' to library from {}", sample_name, sample_path));
+        }
+    }
+    
+    // Automatically add program to library when created in square
+    pub fn auto_add_program_to_library(&mut self, program: &crate::square::Program) {
+        use crate::square::FunctionLibrary;
+        
+        // Check if program already exists in auto library
+        if self.library_manager.get_function("auto", &program.name).is_some() {
+            return; // Already exists
+        }
+        
+        // Get or create auto library
+        if !self.library_manager.function_libraries.contains_key("auto") {
+            let auto_library = FunctionLibrary {
+                name: "auto".to_string(),
+                functions: std::collections::HashMap::new(),
+                description: "Automatically generated functions from square programs".to_string(),
+            };
+            self.library_manager.add_function_library(auto_library);
+        }
+        
+        // Add program to auto library
+        if let Some(auto_lib) = self.library_manager.function_libraries.get_mut("auto") {
+            auto_lib.functions.insert(program.name.clone(), program.clone());
+            self.log_to_console(format!("Auto-added program '{}' to library", program.name));
+        }
+    }
+    
+    // Handle console commands for library access
+    pub fn handle_console_command(&mut self, command: &str) {
+        let parts: Vec<&str> = command.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return;
+        }
+        
+        match parts[0].to_lowercase().as_str() {
+            "lib" | "library" => {
+                if parts.len() == 1 {
+                    self.show_library_help();
+                } else {
+                    match parts[1] {
+                        "list" => self.list_libraries(),
+                        "functions" => {
+                            if parts.len() > 2 {
+                                self.list_functions_in_library(parts[2]);
+                            } else {
+                                self.list_all_functions();
+                            }
+                        },
+                        "samples" => {
+                            if parts.len() > 2 {
+                                self.list_samples_in_library(parts[2]);
+                            } else {
+                                self.list_all_samples();
+                            }
+                        },
+                        "clear" => {
+                            if parts.len() > 2 && parts[2] == "auto" {
+                                self.clear_auto_library();
+                            } else {
+                                self.log_to_console("Usage: lib clear auto".to_string());
+                            }
+                        },
+                        _ => self.show_library_help(),
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    
+    fn show_library_help(&mut self) {
+        self.log_to_console("Library Commands:".to_string());
+        self.log_to_console("  lib list - List all libraries".to_string());
+        self.log_to_console("  lib functions [library] - List functions".to_string());
+        self.log_to_console("  lib samples [library] - List samples".to_string());
+        self.log_to_console("  lib clear auto - Clear auto-generated library".to_string());
+    }
+    
+    fn list_libraries(&mut self) {
+        let mut messages = Vec::new();
+        messages.push("Function Libraries:".to_string());
+        for (name, lib) in &self.library_manager.function_libraries {
+            messages.push(format!("  {} - {} ({} functions)", name, lib.description, lib.functions.len()));
+        }
+        messages.push("Sample Libraries:".to_string());
+        for (name, lib) in &self.library_manager.sample_libraries {
+            messages.push(format!("  {} - {} ({} samples)", name, lib.description, lib.samples.len()));
+        }
+        for message in messages {
+            self.log_to_console(message);
+        }
+    }
+    
+    fn list_functions_in_library(&mut self, library_name: &str) {
+        if let Some(lib) = self.library_manager.function_libraries.get(library_name) {
+            let mut messages = Vec::new();
+            messages.push(format!("Functions in '{}' library:", library_name));
+            for (name, program) in &lib.functions {
+                messages.push(format!("  {} - {} instructions", name, program.instructions.len()));
+            }
+            for message in messages {
+                self.log_to_console(message);
+            }
+        } else {
+            self.log_to_console(format!("Function library '{}' not found", library_name));
+        }
+    }
+    
+    fn list_all_functions(&mut self) {
+        let mut messages = Vec::new();
+        for (lib_name, lib) in &self.library_manager.function_libraries {
+            messages.push(format!("Functions in '{}' library:", lib_name));
+            for (name, program) in &lib.functions {
+                messages.push(format!("  {}.{} - {} instructions", lib_name, name, program.instructions.len()));
+            }
+        }
+        for message in messages {
+            self.log_to_console(message);
+        }
+    }
+    
+    fn list_samples_in_library(&mut self, library_name: &str) {
+        if let Some(lib) = self.library_manager.sample_libraries.get(library_name) {
+            let mut messages = Vec::new();
+            messages.push(format!("Samples in '{}' library:", library_name));
+            for (name, sample) in &lib.samples {
+                messages.push(format!("  {} - speed:{}, dir:{:?}, color:{}", 
+                    name, sample.default_speed, sample.default_direction, sample.color));
+            }
+            for message in messages {
+                self.log_to_console(message);
+            }
+        } else {
+            self.log_to_console(format!("Sample library '{}' not found", library_name));
+        }
+    }
+    
+    fn list_all_samples(&mut self) {
+        let mut messages = Vec::new();
+        for (lib_name, lib) in &self.library_manager.sample_libraries {
+            messages.push(format!("Samples in '{}' library:", lib_name));
+            for (name, sample) in &lib.samples {
+                messages.push(format!("  {}.{} - speed:{}, dir:{:?}, color:{}", 
+                    lib_name, name, sample.default_speed, sample.default_direction, sample.color));
+            }
+        }
+        for message in messages {
+            self.log_to_console(message);
+        }
+    }
+    
+    fn clear_auto_library(&mut self) {
+        self.library_manager.function_libraries.remove("auto");
+        self.library_manager.sample_libraries.remove("auto");
+        self.log_to_console("Cleared auto-generated library".to_string());
+    }
+
+    pub fn resolve_ball_reference(&self, ball_reference: &str, current_square_x: usize, current_square_y: usize) -> Option<usize> {
+        // Parse ball reference syntax: "last.c_red.self(-10)"
+        // Format: last.<color>.self(<speed>)
+        if ball_reference.starts_with("last.") {
+            let parts: Vec<&str> = ball_reference.split('.').collect();
+            if parts.len() >= 3 && parts[0] == "last" && parts[2].starts_with("self") {
+                let ball_color = parts[1];
+                // For "self", we look for collisions with the current square
+                return self.find_last_ball_collision(ball_color, current_square_x, current_square_y);
+            }
+        }
+        None
     }
     
     pub fn update_balls(&mut self, delta_time: f32) -> Vec<(usize, usize, usize)> { // Returns (x, y, ball_index) where samples should be triggered
         let mut triggered_positions = Vec::new();
+        
+        // Clean up finished audio samples for better performance
+        self.audio_engine.cleanup_finished_samples();
+        
+        // Collect reverse sample actions to process after the mutable iteration
+        let mut reverse_sample_actions = Vec::new();
+        
+        // Collect all log messages to avoid borrowing conflicts
+        let mut all_log_messages = Vec::new();
+        
+        // Collect create/destroy actions to process after ball iteration
+        let mut create_ball_actions = Vec::new();
+        let mut destroy_ball_actions = Vec::new();
+        let mut create_square_actions = Vec::new();
+        let mut create_square_with_program_actions = Vec::new();
+        let mut create_ball_from_sample_actions = Vec::new();
+        let mut create_square_from_sample_actions = Vec::new();
+        let mut destroy_square_actions = Vec::new();
+        
+        // Performance monitoring
+        let active_samples = self.audio_engine.get_active_sample_count();
+        if active_samples > 15 {
+            // Skip audio processing if too many samples are playing to prevent audio engine overload
+            self.log_to_console(format!("Audio engine overloaded ({} samples), skipping new triggers", active_samples));
+            return triggered_positions;
+        }
+        
+        // Collect ball information for reference resolution before mutable iteration
+        let ball_positions: Vec<(f32, f32)> = self.balls.iter().map(|b| (b.x, b.y)).collect();
+        let collision_history = self.collision_history.clone();
+        
+        // Helper function to resolve ball references without borrowing self
+        let resolve_ball_ref = |ball_reference: &str, current_square_x: usize, current_square_y: usize| -> Option<usize> {
+            if ball_reference.starts_with("last.") {
+                let parts: Vec<&str> = ball_reference.split('.').collect();
+                if parts.len() >= 3 && parts[0] == "last" && parts[2].starts_with("self") {
+                    let ball_color = parts[1];
+                    // Find the most recent collision of a ball with the specified color hitting the specified square
+                    return collision_history
+                        .iter()
+                        .rev() // Start from most recent
+                        .find(|event| {
+                            event.ball_color == ball_color && 
+                            event.square_x == current_square_x && 
+                            event.square_y == current_square_y
+                        })
+                        .map(|event| event.ball_index);
+                }
+            }
+            None
+        };
         
         for (ball_index, ball) in self.balls.iter_mut().enumerate() {
             if !ball.active {
@@ -193,49 +602,482 @@ impl SequencerGrid {
             for (grid_x, grid_y) in entered_cells {
                 if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
                     if self.cells[grid_y][grid_x].is_square() {
-                        // Execute square program if it has one
-                        let square_program = &self.cells[grid_y][grid_x].program;
-                        if !square_program.programs.is_empty() {
-                            if let Some(active_program_index) = square_program.active_program {
-                                if let Some(program) = square_program.programs.get(active_program_index) {
-                                    let actions = self.program_executor.execute_on_collision(
-                                        program, ball, grid_x, grid_y
-                                    );
-                                    
-                                    // Apply program actions to the ball
-                                    for action in actions {
-                                        match action {
-                                            ProgramAction::SetSpeed(speed) => {
-                                                ball.speed = speed.max(0.1); // Ensure minimum speed
+                        // Record collision event
+                        let collision_event = CollisionEvent {
+                            ball_index,
+                            ball_color: ball.color.clone(),
+                            square_x: grid_x,
+                            square_y: grid_y,
+                            timestamp: std::time::Instant::now(),
+                        };
+                        self.collision_history.push_back(collision_event);
+                        
+                        // Keep only recent collisions (last 100)
+                        if self.collision_history.len() > 100 {
+                            self.collision_history.pop_front();
+                        }
+                        
+                        // Check cooldown before executing program
+                        let can_execute = {
+                            const COOLDOWN_MS: u128 = 100; // 100ms cooldown between executions
+                            let now = std::time::Instant::now();
+                            
+                            // Check if there's an existing cooldown for this combination
+                            if let Some(cooldown) = self.collision_cooldowns.iter().find(|c| 
+                                c.ball_index == ball_index && c.square_x == grid_x && c.square_y == grid_y
+                            ) {
+                                now.duration_since(cooldown.last_collision).as_millis() >= COOLDOWN_MS
+                            } else {
+                                true // No existing cooldown
+                            }
+                        };
+                        
+                        if can_execute {
+                            let square_program = &self.cells[grid_y][grid_x].program;
+                            if !square_program.programs.is_empty() {
+                                if let Some(active_program_index) = square_program.active_program {
+                                    if let Some(program) = square_program.programs.get(active_program_index) {
+                                        let actions = self.program_executor.execute_on_collision(
+                                            program, ball, grid_x, grid_y
+                                        );
+                                        
+                                        // Collect log messages to avoid borrowing conflicts
+                                        if !actions.is_empty() {
+                                            all_log_messages.push(format!(
+                                                "Executing program at ({},{}) for {} ball: {} actions",
+                                                grid_x, grid_y, ball.color, actions.len()
+                                            ));
+                                        }
+                                        
+                                        // Check if any action requires ball position reset
+                                        let mut should_reset_position = false;
+                                        let mut explicit_bounce = false;
+                                        
+                                        // Apply program actions to the ball
+                                        for action in actions {
+                                            match action {
+                                                ProgramAction::SetSpeed(speed) => {
+                                                    all_log_messages.push(format!("  → SetSpeed: {}", speed));
+                                                    ball.speed = speed.max(0.1); // Ensure minimum speed
+                                                    should_reset_position = true;
+                                                }
+                                                ProgramAction::SetDirection(direction) => {
+                                                    all_log_messages.push(format!("  → SetDirection: {:?}", direction));
+                                                    ball.direction = direction;
+                                                    should_reset_position = true;
+                                                }
+                                                ProgramAction::Bounce => {
+                                                    all_log_messages.push("  → Bounce".to_string());
+                                                    ball.reverse_direction();
+                                                    should_reset_position = true;
+                                                    explicit_bounce = true;
+                                                }
+                                                ProgramAction::Stop => {
+                                                    all_log_messages.push("  → Stop".to_string());
+                                                    ball.active = false;
+                                                    should_reset_position = true;
+                                                }
+                                                ProgramAction::PlaySample(sample_index) => {
+                                                    all_log_messages.push(format!("  → PlaySample: {}", sample_index));
+                                                    if let Some(sample_path) = ball.sample_path.as_ref() {
+                                                        // Check if we're approaching audio engine limits
+                                                        let current_active = self.audio_engine.get_active_sample_count();
+                                                        if current_active < 12 { // Conservative limit
+                                                            if let Err(e) = self.audio_engine.play_on_channel(sample_index as u32, sample_path) {
+                                                                eprintln!("Failed to play sample: {}", e);
+                                                            }
+                                                        } else {
+                                                            all_log_messages.push(format!("  → Skipped sample (audio load: {})", current_active));
+                                                        }
+                                                    }
+                                                    // PlaySample doesn't affect ball movement, so don't reset position
+                                                }
+                                                ProgramAction::SetReverse { ball_reference, speed } => {
+                                                    all_log_messages.push(format!("  → SetReverse: {} at speed {}", ball_reference, speed));
+                                                    // Collect for later processing to avoid borrowing conflicts
+                                                    reverse_sample_actions.push((ball_reference, speed, grid_x, grid_y));
+                                                    // SetReverse doesn't affect ball movement, so don't reset position
+                                                }
+                                                ProgramAction::CreateBall { x, y, speed, direction } => {
+                                                    all_log_messages.push(format!("  → CreateBall at ({}, {}) with speed {} and direction {:?}", x, y, speed, direction));
+                                                    create_ball_actions.push((x, y, speed, direction));
+                                                }
+                                                ProgramAction::CreateSquare { x, y } => {
+                                                    all_log_messages.push(format!("  → CreateSquare at ({}, {})", x, y));
+                                                    create_square_actions.push((x, y));
+                                                }
+                                                ProgramAction::CreateSquareWithProgram { x, y, program } => {
+                                                    all_log_messages.push(format!("  → CreateSquareWithProgram at ({}, {})", x, y));
+                                                    create_square_with_program_actions.push((x, y, program));
+                                                }
+                                                ProgramAction::CreateBallFromSample { x, y, library_name, sample_name } => {
+                                                    all_log_messages.push(format!("  → CreateBallFromSample at ({}, {}) from {}.{}", x, y, library_name, sample_name));
+                                                    create_ball_from_sample_actions.push((x, y, library_name, sample_name));
+                                                }
+                                                ProgramAction::CreateSquareFromSample { x, y, library_name, sample_name } => {
+                                                    all_log_messages.push(format!("  → CreateSquareFromSample at ({}, {}) from {}.{}", x, y, library_name, sample_name));
+                                                    create_square_from_sample_actions.push((x, y, library_name, sample_name));
+                                                }
+                                                ProgramAction::CreateBallWithLibrary { x, y, library_function, audio_file } => {
+                                                    all_log_messages.push(format!("  → CreateBallWithLibrary at ({}, {}) with lib.{}", x, y, library_function));
+                                                    if let Some(ref audio) = audio_file {
+                                                        all_log_messages.push(format!("    and lib.{}", audio));
+                                                    }
+                                                    
+                                                    // Create ball with library function loaded
+                                                    let grid_x = x as usize;
+                                                    let grid_y = y as usize;
+                                                    if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                                                        let mut new_ball = Ball::new(grid_x, grid_y);
+                                                        
+                                                        // Load audio file if specified
+                                                        if let Some(ref audio_name) = audio_file {
+                                                            // Audio loading would be handled by audio system
+                                                            all_log_messages.push(format!("    Audio {} loaded into ball", audio_name));
+                                                        }
+                                                        
+                                                        new_ball.activate();
+                                                        // Use default speed and direction for library-created balls
+                                                        create_ball_actions.push((x, y, 1.0, crate::ball::Direction::Right));
+                                                        all_log_messages.push(format!("    Ball created at ({}, {})", grid_x, grid_y));
+                                                    }
+                                                }
+                                                ProgramAction::CreateSquareWithLibrary { x, y, library_function, audio_file } => {
+                                                    all_log_messages.push(format!("  → CreateSquareWithLibrary at ({}, {}) with lib.{}", x, y, library_function));
+                                                    if let Some(audio) = audio_file {
+                                                        all_log_messages.push(format!("    and lib.{}", audio));
+                                                    }
+                                                    
+                                                    // Create square with library function loaded
+                                                    let grid_x = x as usize;
+                                                    let grid_y = y as usize;
+                                                    if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                                                        // Get the library function program
+                                                        if let Some(library_program) = self.library_manager.get_function("lib", &library_function) {
+                                                            self.cells[grid_y][grid_x].place_square(None);
+                                                            self.cells[grid_y][grid_x].program.add_program(library_program.clone());
+                                                            let program_count = self.cells[grid_y][grid_x].program.programs.len();
+                                                            self.cells[grid_y][grid_x].program.set_active_program(Some(program_count - 1));
+                                                            
+                                                            all_log_messages.push(format!("    Square created at ({}, {}) with lib.{} loaded", grid_x, grid_y, library_function));
+                                                        } else {
+                                                            all_log_messages.push(format!("    Failed to load library function: lib.{}", library_function));
+                                                        }
+                                                    }
+                                                }
+                                                ProgramAction::DestroyBall { x, y, ball_reference } => {
+                                                    if let Some(ball_ref) = ball_reference {
+                                                        if ball_ref == "self" {
+                                                            // Destroy the current ball
+                                                            all_log_messages.push(format!("  → DestroyBall self (ball {})", ball_index));
+                                                            destroy_ball_actions.push((ball.x, ball.y));
+                                                        } else if let Some(target_ball_index) = resolve_ball_ref(&ball_ref, grid_x, grid_y) {
+                                                             if target_ball_index < ball_positions.len() {
+                                                                 let (target_x, target_y) = ball_positions[target_ball_index];
+                                                                 all_log_messages.push(format!("  → DestroyBall {} (ball {})", ball_ref, target_ball_index));
+                                                                 destroy_ball_actions.push((target_x, target_y));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // Coordinate-based destruction
+                                                        all_log_messages.push(format!("  → DestroyBall at ({}, {})", x, y));
+                                                        destroy_ball_actions.push((x, y));
+                                                    }
+                                                }
+                                                ProgramAction::DestroySquare { x, y, ball_reference } => {
+                                                    if let Some(ball_ref) = ball_reference {
+                                                        if ball_ref == "self" {
+                                                            // Destroy square at current ball position
+                                                            all_log_messages.push(format!("  → DestroySquare self at ({}, {})", grid_x, grid_y));
+                                                            destroy_square_actions.push((grid_x as f32, grid_y as f32));
+                                                        } else if let Some(target_ball_index) = resolve_ball_ref(&ball_ref, grid_x, grid_y) {
+                                                             if target_ball_index < ball_positions.len() {
+                                                                 let (target_x, target_y) = ball_positions[target_ball_index];
+                                                                 let target_grid_x = target_x.round() as usize;
+                                                                 let target_grid_y = target_y.round() as usize;
+                                                                 all_log_messages.push(format!("  → DestroySquare {} at ({}, {})", ball_ref, target_grid_x, target_grid_y));
+                                                                 destroy_square_actions.push((target_grid_x as f32, target_grid_y as f32));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // Coordinate-based destruction
+                                                        all_log_messages.push(format!("  → DestroySquare at ({}, {})", x, y));
+                                                        destroy_square_actions.push((x, y));
+                                                    }
+                                                }
+                                                ProgramAction::ExecuteLibraryFunction { library_function } => {
+                                                    all_log_messages.push(format!("  → ExecuteLibraryFunction: {}", library_function));
+                                                    
+                                                    // Parse the library function call (e.g., "lib.new_program")
+                                                    if library_function.starts_with("lib.") {
+                                                        let function_name = &library_function[4..]; // Remove "lib." prefix
+                                                        
+                                                        // Get the library function program and execute it
+                                                        if let Some(library_program) = self.library_manager.get_function("lib", function_name) {
+                                                            all_log_messages.push(format!("    Executing library function: {}", function_name));
+                                                            
+                                                            // Execute the library function's instructions
+                                                            let mut context = crate::square::ExecutionContext {
+                                                                variables: std::collections::HashMap::new(),
+                                                                ball_hit_count: 0,
+                                                                square_hit_count: 0,
+                                                                ball_x: ball.x,
+                                                                ball_y: ball.y,
+                                                                ball_speed: ball.speed,
+                                                                ball_direction: ball.direction,
+                                                            };
+                                                            let library_actions = library_program.execute_instructions(&library_program.instructions, &mut context);
+                                                            
+                                                            // Apply the actions from the library function
+                                                            for library_action in library_actions {
+                                                                match library_action {
+                                                                    ProgramAction::CreateBall { x, y, speed, direction } => {
+                                                                        all_log_messages.push(format!("    Library function creating ball at ({}, {})", x, y));
+                                                                        create_ball_actions.push((x, y, speed, direction));
+                                                                    }
+                                                                    ProgramAction::CreateSquare { x, y } => {
+                                                                        all_log_messages.push(format!("    Library function creating square at ({}, {})", x, y));
+                                                                        create_square_actions.push((x, y));
+                                                                    }
+                                                                    // Handle other actions as needed
+                                                                    _ => {
+                                                                        all_log_messages.push(format!("    Library function action: {:?}", library_action));
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            all_log_messages.push(format!("    Failed to find library function: {}", function_name));
+                                                        }
+                                                    } else {
+                                                        all_log_messages.push(format!("    Invalid library function format: {}", library_function));
+                                                    }
+                                                }
+                                                _ => {
+                                                    all_log_messages.push("  → Unknown action".to_string());
+                                                } // Handle other actions as needed
                                             }
-                                            ProgramAction::SetDirection(direction) => {
-                                                ball.direction = direction;
+                                        }
+                                        
+                                        // Always bounce off squares unless an explicit bounce was already performed
+                                        if !explicit_bounce {
+                                            ball.reverse_direction();
+                                            should_reset_position = true;
+                                        }
+                                        
+                                        // Reset position if the action affects ball movement or if we bounced
+                                        if should_reset_position {
+                                            // Move ball back to previous position to prevent overlap
+                                            ball.x = old_x;
+                                            ball.y = old_y;
+                                            ball.last_grid_x = old_x.floor() as usize;
+                                            ball.last_grid_y = old_y.floor() as usize;
+                                        }
+                                        
+                                        // Update cooldown tracking
+                                        let now = std::time::Instant::now();
+                                        if let Some(cooldown) = self.collision_cooldowns.iter_mut().find(|c| 
+                                            c.ball_index == ball_index && c.square_x == grid_x && c.square_y == grid_y
+                                        ) {
+                                            cooldown.last_collision = now;
+                                        } else {
+                                            self.collision_cooldowns.push(CollisionCooldown {
+                                                ball_index,
+                                                square_x: grid_x,
+                                                square_y: grid_y,
+                                                last_collision: now,
+                                            });
+                                            
+                                            // Clean up old cooldowns (keep only last 50)
+                                            if self.collision_cooldowns.len() > 50 {
+                                                self.collision_cooldowns.remove(0);
                                             }
-                                            ProgramAction::Bounce => {
-                                                ball.reverse_direction();
-                                            }
-                                            ProgramAction::Stop => {
-                                                ball.active = false;
-                                            }
-                                            _ => {} // Handle other actions as needed
                                         }
                                     }
                                 }
+                            } else {
+                                // Default behavior: reverse direction
+                                ball.reverse_direction();
+                                // Move ball back to previous position to prevent overlap
+                                ball.x = old_x;
+                                ball.y = old_y;
+                                ball.last_grid_x = old_x.floor() as usize;
+                                ball.last_grid_y = old_y.floor() as usize;
                             }
                         } else {
-                            // Default behavior: reverse direction
+                            // Cooldown active, just reverse direction without executing program
                             ball.reverse_direction();
+                            // Move ball back to previous position to prevent overlap
+                            ball.x = old_x;
+                            ball.y = old_y;
+                            ball.last_grid_x = old_x.floor() as usize;
+                            ball.last_grid_y = old_y.floor() as usize;
                         }
                         
-                        // Move ball back to previous position to prevent overlap
-                        ball.x = old_x;
-                        ball.y = old_y;
-                        ball.last_grid_x = old_x.floor() as usize;
-                        ball.last_grid_y = old_y.floor() as usize;
                         triggered_positions.push((grid_x, grid_y, ball_index));
                         break; // Only trigger once per update
                     }
                 }
+            }
+        }
+        
+        // Process reverse sample actions after the mutable iteration
+        for (ball_reference, speed, grid_x, grid_y) in reverse_sample_actions {
+            if let Some(referenced_ball_index) = self.resolve_ball_reference(&ball_reference, grid_x, grid_y) {
+                if let Some(referenced_ball) = self.balls.get(referenced_ball_index) {
+                    if let Some(sample_path) = referenced_ball.sample_path.as_ref() {
+                        if let Err(e) = self.audio_engine.play_reverse_on_channel(0, sample_path, speed) {
+                            eprintln!("Failed to play reverse sample: {}", e);
+                        }
+                    } else {
+                        eprintln!("Referenced ball has no sample loaded");
+                    }
+                } else {
+                    eprintln!("Referenced ball index {} not found", referenced_ball_index);
+                }
+            } else {
+                eprintln!("Could not resolve ball reference: {}", ball_reference);
+            }
+        }
+        
+        // Process create/destroy actions after the mutable iteration
+        for (x, y, speed, direction) in create_ball_actions {
+            let grid_x = x.round() as usize;
+            let grid_y = y.round() as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                let mut new_ball = Ball::new(grid_x, grid_y);
+                new_ball.speed = speed;
+                new_ball.direction = direction;
+                new_ball.activate(); // Activate the newly created ball
+                let is_active = new_ball.active;
+                self.balls.push(new_ball);
+                self.log_to_console(format!("Ball created at ({}, {}) - Total balls: {}, Active: {}", 
+                    grid_x, grid_y, self.balls.len(), is_active));
+            } else {
+                self.log_to_console(format!("Ball creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
+            }
+        }
+        
+        for (x, y) in create_square_actions {
+            let grid_x = x as usize;
+            let grid_y = y as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                self.cells[grid_y][grid_x].place_square(Some([255, 100, 100])); // Red square
+            }
+        }
+        
+        for (x, y, program) in create_square_with_program_actions {
+            let grid_x = x as usize;
+            let grid_y = y as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                self.cells[grid_y][grid_x].place_square(Some([255, 100, 100])); // Red square
+                self.cells[grid_y][grid_x].program.add_program(program.clone());
+                // Set the newly added program as active
+                let program_count = self.cells[grid_y][grid_x].program.programs.len();
+                self.cells[grid_y][grid_x].program.set_active_program(Some(program_count - 1));
+                // Automatically add program to library
+                self.auto_add_program_to_library(&program);
+                self.log_to_console(format!("Square with program created at ({}, {})", grid_x, grid_y));
+            }
+        }
+        
+        // Process sample-based creation actions
+        for (x, y, library_name, sample_name) in create_ball_from_sample_actions {
+            let grid_x = x as usize;
+            let grid_y = y as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                if let Some(sample_template) = self.library_manager.get_ball_sample(&library_name, &sample_name) {
+                    let template_clone = sample_template.clone();
+                    let mut new_ball = Ball::new(grid_x, grid_y);
+                    new_ball.speed = template_clone.default_speed;
+                    new_ball.direction = template_clone.default_direction;
+                    new_ball.color = template_clone.color.clone();
+                    
+                    // Set sample path based on sample name (assuming .wav extension)
+                    let sample_path = format!("{}.wav", sample_name);
+                    new_ball.set_sample(sample_path.clone());
+                    
+                    // Automatically add sample to library
+                    self.auto_add_sample_to_library(&sample_path, "ball");
+                    
+                    new_ball.activate();
+                    self.balls.push(new_ball);
+                    self.log_to_console(format!("Ball created from sample {}.{} at ({}, {}) with sample path {}", library_name, sample_name, grid_x, grid_y, sample_path));
+                } else {
+                    self.log_to_console(format!("Failed to create ball: sample {}.{} not found", library_name, sample_name));
+                }
+            } else {
+                self.log_to_console(format!("Ball creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
+            }
+        }
+        
+        for (x, y, library_name, sample_name) in create_square_from_sample_actions {
+            let grid_x = x as usize;
+            let grid_y = y as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                if let Some(sample_template) = self.library_manager.get_square_sample(&library_name, &sample_name) {
+                    // Parse color string to RGB array
+                    let color_rgb = if sample_template.color == "red" {
+                        [255, 100, 100]
+                    } else if sample_template.color == "blue" {
+                        [100, 100, 255]
+                    } else if sample_template.color == "green" {
+                        [100, 255, 100]
+                    } else {
+                        [200, 200, 200] // Default gray
+                    };
+                    self.cells[grid_y][grid_x].place_square(Some(color_rgb));
+                    if let Some(program_name) = &sample_template.behavior_program {
+                        // Look up the actual program from the library
+                        if let Some(library_program) = self.library_manager.get_function("lib", program_name) {
+                            let program_clone = library_program.clone();
+                            self.cells[grid_y][grid_x].program.add_program(program_clone.clone());
+                            let program_count = self.cells[grid_y][grid_x].program.programs.len();
+                            self.cells[grid_y][grid_x].program.set_active_program(Some(program_count - 1));
+                            // Automatically add program to library
+                            self.auto_add_program_to_library(&program_clone);
+                        }
+                    }
+                    self.log_to_console(format!("Square created from sample {}.{} at ({}, {})", library_name, sample_name, grid_x, grid_y));
+                } else {
+                    self.log_to_console(format!("Failed to create square: sample {}.{} not found", library_name, sample_name));
+                }
+            } else {
+                self.log_to_console(format!("Square creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
+            }
+        }
+        
+        for (x, y) in destroy_ball_actions {
+            let grid_x = x.round() as usize;
+            let grid_y = y.round() as usize;
+            // Remove balls at the specified position
+            self.balls.retain(|ball| {
+                let ball_grid_x = ball.x.round() as usize;
+                let ball_grid_y = ball.y.round() as usize;
+                !(ball_grid_x == grid_x && ball_grid_y == grid_y)
+            });
+        }
+        
+        for (x, y) in destroy_square_actions {
+            let grid_x = x.round() as usize;
+            let grid_y = y.round() as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                self.cells[grid_y][grid_x].clear();
+            }
+        }
+        
+        // Log all collected messages after ball processing is complete
+        for message in all_log_messages {
+            self.log_to_console(message);
+        }
+        
+        // Periodic performance logging (every 100 updates)
+        static mut UPDATE_COUNTER: u32 = 0;
+        unsafe {
+            UPDATE_COUNTER += 1;
+            if UPDATE_COUNTER % 100 == 0 {
+                let active = self.audio_engine.get_active_sample_count();
+                let cache_size = self.audio_engine.get_cache_size();
+                self.log_to_console(format!("Audio: {} active samples, {} cached", active, cache_size));
             }
         }
         
@@ -257,8 +1099,11 @@ impl SequencerUI {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
         let pixels = Pixels::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)?;
         
+        // Clone the audio engine for the grid
+        let grid_audio_engine = AudioEngine::new().map_err(|e| Error::UserDefined(Box::new(e)))?;
+        
         Ok(Self {
-            grid: SequencerGrid::new(),
+            grid: SequencerGrid::new(grid_audio_engine),
             pixels,
             input: WinitInputHelper::new(),
             last_update: std::time::Instant::now(),
@@ -300,10 +1145,12 @@ impl SequencerUI {
                     match action {
                         SquareMenuAction::SaveProgram { square_x, square_y, program } => {
                             if square_x < GRID_WIDTH && square_y < GRID_HEIGHT {
-                                self.grid.cells[square_y][square_x].program.add_program(program);
+                                self.grid.cells[square_y][square_x].program.add_program(program.clone());
                                 // Set the newly added program as active
                                 let program_count = self.grid.cells[square_y][square_x].program.programs.len();
                                 self.grid.cells[square_y][square_x].program.set_active_program(Some(program_count - 1));
+                                // Automatically add program to library
+                                self.grid.auto_add_program_to_library(&program);
                             }
                         }
                         SquareMenuAction::TestProgram { square_x, square_y } => {
@@ -321,8 +1168,72 @@ impl SequencerUI {
                 return; // Don't process other input while square menu is open
             }
 
+            // Library GUI toggle (G key) - always available
+            if self.input.key_pressed(VirtualKeyCode::G) {
+                self.grid.library_gui.toggle();
+            }
             
-            // Normal grid navigation
+            // Handle library GUI input if visible
+            if self.grid.library_gui.is_visible() {
+                if let Some(action) = self.grid.library_gui.handle_input(&self.input, &self.grid.library_manager, &self.grid.cells) {
+                    match action {
+                        LibraryGuiAction::RenameItem { library_name, old_name, new_name, is_sample } => {
+                            // TODO: Implement rename functionality
+                            self.grid.log_to_console(format!("Rename {} from {} to {} in library {}", 
+                                if is_sample { "sample" } else { "program" }, old_name, new_name, library_name));
+                        }
+                        LibraryGuiAction::DeleteItem { library_name, item_name, is_sample } => {
+                            // TODO: Implement delete functionality
+                            self.grid.log_to_console(format!("Delete {} {} from library {}", 
+                                if is_sample { "sample" } else { "program" }, item_name, library_name));
+                        }
+                        LibraryGuiAction::CreateProgram { library_name, name, program } => {
+                            // Add program to the specified library
+                            if let Some(lib) = self.grid.library_manager.function_libraries.get_mut(&library_name) {
+                                lib.functions.insert(name.clone(), program);
+                                self.grid.log_to_console(format!("Created program '{}' in library '{}'", name, library_name));
+                            } else {
+                                // Create library if it doesn't exist
+                                let mut new_lib = crate::square::FunctionLibrary {
+                                    name: library_name.clone(),
+                                    functions: std::collections::HashMap::new(),
+                                    description: format!("User created library: {}", library_name),
+                                };
+                                new_lib.functions.insert(name.clone(), program);
+                                self.grid.library_manager.function_libraries.insert(library_name.clone(), new_lib);
+                                self.grid.log_to_console(format!("Created library '{}' and program '{}'", library_name, name));
+                            }
+                        }
+                        LibraryGuiAction::EditProgram { source, name, program } => {
+                            match source {
+                                crate::library_gui::ProgramSource::Library { library_name } => {
+                                    // Update program in library
+                                    if let Some(lib) = self.grid.library_manager.function_libraries.get_mut(&library_name) {
+                                        lib.functions.insert(name.clone(), program);
+                                        self.grid.log_to_console(format!("Updated program '{}' in library '{}'", name, library_name));
+                                    }
+                                },
+                                crate::library_gui::ProgramSource::Square { x, y, program_index } => {
+                                    // Update program in square
+                                    if x < crate::sequencer::GRID_WIDTH && y < crate::sequencer::GRID_HEIGHT {
+                                        if let Some(square_program) = self.grid.cells[y][x].program.programs.get_mut(program_index) {
+                                            *square_program = program;
+                                            self.grid.log_to_console(format!("Updated program '{}' in square ({}, {})", name, x, y));
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                        LibraryGuiAction::LoadSample { library_name } => {
+                            // TODO: Implement load sample functionality (open file dialog)
+                            self.grid.log_to_console(format!("Load sample into library {}", library_name));
+                        }
+                    }
+                }
+                return; // Don't process other input while library GUI is open
+            }
+            
+            // Normal grid navigation (only when library GUI is not open)
             if self.input.key_pressed(VirtualKeyCode::Up) {
                 self.grid.cursor.move_up();
             }
@@ -365,6 +1276,23 @@ impl SequencerUI {
                 if self.grid.cells[self.grid.cursor.y][self.grid.cursor.x].content == CellContent::Square {
                     self.grid.square_menu.open_square_menu(self.grid.cursor.x, self.grid.cursor.y);
                 }
+            }
+
+            
+            // Console commands (L key for Library)
+            if self.input.key_pressed(VirtualKeyCode::L) {
+                self.grid.handle_console_command("lib list");
+            }
+            
+            // Quick library commands
+            if self.input.key_pressed(VirtualKeyCode::F1) {
+                self.grid.handle_console_command("lib functions");
+            }
+            if self.input.key_pressed(VirtualKeyCode::F2) {
+                self.grid.handle_console_command("lib samples");
+            }
+            if self.input.key_pressed(VirtualKeyCode::F3) {
+                self.grid.handle_console_command("lib clear auto");
             }
         }
     }
@@ -430,9 +1358,683 @@ impl SequencerUI {
         // Draw square menu if open
         self.grid.square_menu.render(frame, &self.grid.cells);
         
+        // Draw library GUI if visible
+        self.grid.library_gui.render(frame, &self.grid.library_manager, &self.grid.cells, WINDOW_WIDTH, WINDOW_HEIGHT);
+        
+        // Draw console area
+        Self::draw_console_static(frame, &self.grid.console_messages);
+        
+        // Draw cursor coordinates in top left corner
+        Self::draw_cursor_coordinates(frame, self.grid.cursor.x, self.grid.cursor.y);
+        
         self.pixels.render()
     }
     
+    fn draw_console_static(frame: &mut [u8], console_messages: &VecDeque<String>) {
+        // Draw console background
+        let console_y_start = GRID_AREA_HEIGHT;
+        for y in console_y_start..WINDOW_HEIGHT {
+            for x in 0..WINDOW_WIDTH {
+                let idx = (y * WINDOW_WIDTH + x) * 4;
+                if idx + 3 < frame.len() {
+                    frame[idx] = 30;     // R - darker background
+                    frame[idx + 1] = 30; // G
+                    frame[idx + 2] = 30; // B
+                    frame[idx + 3] = 255; // A
+                }
+            }
+        }
+        
+        // Draw console border
+        for x in 0..WINDOW_WIDTH {
+            let idx = (console_y_start * WINDOW_WIDTH + x) * 4;
+            if idx + 3 < frame.len() {
+                frame[idx] = 100;     // R - border color
+                frame[idx + 1] = 100; // G
+                frame[idx + 2] = 100; // B
+                frame[idx + 3] = 255; // A
+            }
+        }
+        
+        // Draw console messages
+        for (i, message) in console_messages.iter().enumerate() {
+            let text_y = console_y_start + 10 + i * 14;
+            if text_y + 12 < WINDOW_HEIGHT {
+                Self::draw_menu_text(frame, message, 5, text_y, [200, 200, 200], false);
+            }
+        }
+    }
+    
+    fn draw_cursor_coordinates(frame: &mut [u8], cursor_x: usize, cursor_y: usize) {
+        let coord_text = format!("({}, {})", cursor_x, cursor_y);
+        Self::draw_menu_text(frame, &coord_text, 10, 10, [255, 255, 255], false); // White text in top left
+    }
+    
+    fn draw_menu_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
+        let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
+        
+        // Draw background if selected
+        if selected {
+            let text_width = text.len() * 8;
+            let text_height = 12;
+            for py in y..y + text_height {
+                for px in x..x + text_width {
+                    if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
+                        let index = (py * WINDOW_WIDTH + px) * 4;
+                        if index + 3 < frame.len() {
+                            frame[index] = bg_color[0];
+                            frame[index + 1] = bg_color[1];
+                            frame[index + 2] = bg_color[2];
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Draw text characters
+        for (i, ch) in text.chars().enumerate() {
+            Self::draw_menu_char(frame, ch, x + i * 8, y, color);
+        }
+    }
+    
+    fn draw_menu_char(frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3]) {
+        // 8x12 bitmap font patterns (same as menu system)
+        let pattern = match ch {
+            'A' | 'a' => [
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b11111000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'B' | 'b' => [
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b11110000,
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b11110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'C' | 'c' => [
+                0b01110000,
+                0b10001000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'D' | 'd' => [
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b11110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'E' | 'e' => [
+                0b11111000,
+                0b10000000,
+                0b10000000,
+                0b11110000,
+                0b11110000,
+                0b10000000,
+                0b10000000,
+                0b11111000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'F' | 'f' => [
+                0b11111000,
+                0b10000000,
+                0b10000000,
+                0b11110000,
+                0b11110000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'G' | 'g' => [
+                0b01110000,
+                0b10001000,
+                0b10000000,
+                0b10000000,
+                0b10011000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'H' | 'h' => [
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b11111000,
+                0b11111000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'I' | 'i' => [
+                0b01110000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'J' | 'j' => [
+                0b00111000,
+                0b00001000,
+                0b00001000,
+                0b00001000,
+                0b00001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'K' | 'k' => [
+                0b10001000,
+                0b10010000,
+                0b10100000,
+                0b11000000,
+                0b11000000,
+                0b10100000,
+                0b10010000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'L' | 'l' => [
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b11111000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'M' | 'm' => [
+                0b10001000,
+                0b11011000,
+                0b10101000,
+                0b10101000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'N' | 'n' => [
+                0b10001000,
+                0b11001000,
+                0b10101000,
+                0b10101000,
+                0b10101000,
+                0b10011000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'O' | 'o' => [
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'P' | 'p' => [
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b11110000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b10000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'Q' | 'q' => [
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10101000,
+                0b10010000,
+                0b01110000,
+                0b00001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'R' | 'r' => [
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b11110000,
+                0b10100000,
+                0b10010000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'S' | 's' => [
+                0b01110000,
+                0b10001000,
+                0b10000000,
+                0b01110000,
+                0b00001000,
+                0b00001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'T' | 't' => [
+                0b11111000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'U' | 'u' => [
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'V' | 'v' => [
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01010000,
+                0b01010000,
+                0b00100000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'W' | 'w' => [
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10101000,
+                0b10101000,
+                0b11011000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'X' | 'x' => [
+                0b10001000,
+                0b10001000,
+                0b01010000,
+                0b00100000,
+                0b00100000,
+                0b01010000,
+                0b10001000,
+                0b10001000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'Y' | 'y' => [
+                0b10001000,
+                0b10001000,
+                0b01010000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            'Z' | 'z' => [
+                0b11111000,
+                0b00001000,
+                0b00010000,
+                0b00100000,
+                0b01000000,
+                0b10000000,
+                0b10000000,
+                0b11111000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '0' => [
+                0b01110000,
+                0b10001000,
+                0b10011000,
+                0b10101000,
+                0b11001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '1' => [
+                0b00100000,
+                0b01100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b00100000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '2' => [
+                0b01110000,
+                0b10001000,
+                0b00001000,
+                0b00010000,
+                0b00100000,
+                0b01000000,
+                0b10000000,
+                0b11111000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '3' => [
+                0b01110000,
+                0b10001000,
+                0b00001000,
+                0b00110000,
+                0b00001000,
+                0b00001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '4' => [
+                0b00010000,
+                0b00110000,
+                0b01010000,
+                0b10010000,
+                0b11111000,
+                0b00010000,
+                0b00010000,
+                0b00010000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '5' => [
+                0b11111000,
+                0b10000000,
+                0b10000000,
+                0b11110000,
+                0b00001000,
+                0b00001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '6' => [
+                0b00110000,
+                0b01000000,
+                0b10000000,
+                0b11110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '7' => [
+                0b11111000,
+                0b00001000,
+                0b00010000,
+                0b00100000,
+                0b01000000,
+                0b01000000,
+                0b01000000,
+                0b01000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '8' => [
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01110000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '9' => [
+                0b01110000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b01111000,
+                0b00001000,
+                0b00010000,
+                0b01100000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            ' ' => [
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            '(' => [
+                0b00010000,
+                0b00100000,
+                0b01000000,
+                0b01000000,
+                0b01000000,
+                0b01000000,
+                0b00100000,
+                0b00010000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            ')' => [
+                0b01000000,
+                0b00100000,
+                0b00010000,
+                0b00010000,
+                0b00010000,
+                0b00010000,
+                0b00100000,
+                0b01000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            ',' => [
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b01100000,
+                0b01100000,
+                0b00100000,
+                0b01000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+            _ => [
+                0b11111000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b10001000,
+                0b11111000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+                0b00000000,
+            ],
+        };
+        
+        for (row, &byte) in pattern.iter().enumerate() {
+            for bit in 0..8 {
+                if (byte >> (7 - bit)) & 1 == 1 {
+                    let px = x + bit;
+                    let py = y + row;
+                    if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
+                        let idx = (py * WINDOW_WIDTH + px) * 4;
+                        if idx + 3 < frame.len() {
+                            frame[idx] = color[0];     // R
+                            frame[idx + 1] = color[1]; // G
+                            frame[idx + 2] = color[2]; // B
+                            frame[idx + 3] = 255;      // A
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn draw_grid_lines_static(frame: &mut [u8]) {
         let grid_color = [60, 60, 60];
         

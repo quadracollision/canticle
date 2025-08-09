@@ -6,6 +6,7 @@ pub enum ContextMenuState {
     BallMenu { ball_index: usize, selected_option: usize },
     BallDirection { ball_index: usize, selected_option: usize },
     BallSpeed { ball_index: usize, speed: f32 }, // speed in grid units per second
+    BallRelativeSpeed { ball_index: usize, selected_ball: usize, speed_ratio: f32 },
     BallSample { ball_index: usize, selected_option: usize },
     BallColor { ball_index: usize, selected_option: usize },
 }
@@ -14,13 +15,15 @@ pub struct ContextMenu {
     pub state: ContextMenuState,
 }
 
-const BALL_MENU_OPTIONS: &[&str] = &["Direction", "Speed", "Sample", "Color"];
+const BALL_MENU_OPTIONS: &[&str] = &["Direction", "Speed", "Relative Speed", "Sample", "Color"];
 const DIRECTION_OPTIONS: &[&str] = &["Up", "Down", "Left", "Right", "Up-Left", "Up-Right", "Down-Left", "Down-Right"];
 const MIN_SPEED: f32 = 0.5;
 const MAX_SPEED: f32 = 10.0;
 const SPEED_STEP: f32 = 0.1;
 const SAMPLE_OPTIONS: &[&str] = &["Kick", "Snare", "Hi-hat", "Load File..."];
 const COLOR_OPTIONS: &[&str] = &["Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Orange"];
+const RELATIVE_SPEED_RATIOS: &[f32] = &[1.0/16.0, 1.0/8.0, 1.0/4.0, 1.0/2.0, 1.0, 2.0, 4.0, 8.0, 16.0];
+const RELATIVE_SPEED_LABELS: &[&str] = &["1/16x", "1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", "16x"];
 
 impl ContextMenu {
     pub fn new() -> Self {
@@ -70,8 +73,13 @@ impl ContextMenu {
                             let current_speed = balls.get(ball_index).map(|b| b.speed).unwrap_or(2.0);
                             self.state = ContextMenuState::BallSpeed { ball_index, speed: current_speed };
                         },
-                        2 => self.state = ContextMenuState::BallSample { ball_index, selected_option: 0 },
-                        3 => self.state = ContextMenuState::BallColor { ball_index, selected_option: 0 },
+                        2 => {
+                            // Relative Speed - find first other ball or default to ball 0
+                            let selected_ball = if ball_index == 0 && balls.len() > 1 { 1 } else { 0 };
+                            self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio: 1.0 };
+                        },
+                        3 => self.state = ContextMenuState::BallSample { ball_index, selected_option: 0 },
+                        4 => self.state = ContextMenuState::BallColor { ball_index, selected_option: 0 },
                         _ => {}
                     }
                     return None;
@@ -131,9 +139,49 @@ impl ContextMenu {
                 }
                 None
             }
-            ContextMenuState::BallSample { ball_index, selected_option } => {
+            ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio } => {
                 if input.key_pressed(VirtualKeyCode::Escape) {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Up) {
+                    // Cycle through available balls
+                    let new_selected = if selected_ball == 0 { balls.len().saturating_sub(1) } else { selected_ball - 1 };
+                    self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball: new_selected, speed_ratio };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Down) {
+                    // Cycle through available balls
+                    let new_selected = (selected_ball + 1) % balls.len().max(1);
+                    self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball: new_selected, speed_ratio };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Left) {
+                    // Decrease speed ratio
+                    let current_index = RELATIVE_SPEED_RATIOS.iter().position(|&r| (r - speed_ratio).abs() < 0.001).unwrap_or(4);
+                    let new_index = if current_index == 0 { RELATIVE_SPEED_RATIOS.len() - 1 } else { current_index - 1 };
+                    self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio: RELATIVE_SPEED_RATIOS[new_index] };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Right) {
+                    // Increase speed ratio
+                    let current_index = RELATIVE_SPEED_RATIOS.iter().position(|&r| (r - speed_ratio).abs() < 0.001).unwrap_or(4);
+                    let new_index = (current_index + 1) % RELATIVE_SPEED_RATIOS.len();
+                    self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio: RELATIVE_SPEED_RATIOS[new_index] };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Space) {
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                    if let Some(reference_ball) = balls.get(selected_ball) {
+                        let new_speed = reference_ball.speed * speed_ratio;
+                        return Some(ContextMenuAction::SetSpeed { ball_index, speed: new_speed.clamp(MIN_SPEED, MAX_SPEED) });
+                    }
+                }
+                None
+            }
+            ContextMenuState::BallSample { ball_index, selected_option } => {
+                if input.key_pressed(VirtualKeyCode::Escape) {
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                     return None;
                 }
                 if input.key_pressed(VirtualKeyCode::Up) {
@@ -150,27 +198,27 @@ impl ContextMenu {
                     match selected_option {
                         0 => {
                             let sample = "kick.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                             return Some(ContextMenuAction::SetSample { ball_index, sample });
                         }
                         1 => {
                             let sample = "snare.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                             return Some(ContextMenuAction::SetSample { ball_index, sample });
                         }
                         2 => {
                             let sample = "hihat.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                             return Some(ContextMenuAction::SetSample { ball_index, sample });
                         }
                         3 => {
                             // Load File... option
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                             return Some(ContextMenuAction::OpenFileDialog { ball_index });
                         }
                         _ => {
                             let sample = "kick.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 2 };
+                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
                             return Some(ContextMenuAction::SetSample { ball_index, sample });
                         }
                     }
@@ -179,7 +227,7 @@ impl ContextMenu {
             }
             ContextMenuState::BallColor { ball_index, selected_option } => {
                 if input.key_pressed(VirtualKeyCode::Escape) {
-                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 4 };
                     return None;
                 }
                 if input.key_pressed(VirtualKeyCode::Up) {
@@ -194,7 +242,7 @@ impl ContextMenu {
                 }
                 if input.key_pressed(VirtualKeyCode::Space) {
                     let color = COLOR_OPTIONS[selected_option].to_string();
-                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
+                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 4 };
                     return Some(ContextMenuAction::SetColor { ball_index, color });
                 }
                 None
@@ -221,6 +269,12 @@ impl ContextMenu {
                 if let Some(ball) = balls.get(ball_index) {
                     let (ball_x, ball_y) = ball.get_grid_position();
                     draw_speed_slider(frame, ball_x, ball_y, speed);
+                }
+            }
+            ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio } => {
+                if let Some(ball) = balls.get(ball_index) {
+                    let (ball_x, ball_y) = ball.get_grid_position();
+                    draw_relative_speed_menu(frame, ball_x, ball_y, selected_ball, speed_ratio, balls);
                 }
             }
             ContextMenuState::BallSample { ball_index, selected_option } => {
@@ -292,230 +346,486 @@ fn draw_menu_border(frame: &mut [u8], x: usize, y: usize, width: usize, height: 
 }
 
 fn draw_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
-    let bg_color = if selected { [100, 100, 255] } else { [40, 40, 40] };
-    let text_color = if selected { [255, 255, 255] } else { color };
+    let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
     
-    // Draw background for text area
-    let text_width = text.len() * 8; // Approximate character width
-    let text_height = 12; // Approximate character height
-    
-    for dy in 0..text_height {
-        for dx in 0..text_width {
-            let px = x + dx;
-            let py = y + dy;
-            if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                let idx = (py * WINDOW_WIDTH + px) * 4;
-                frame[idx] = bg_color[0];     // R
-                frame[idx + 1] = bg_color[1]; // G
-                frame[idx + 2] = bg_color[2]; // B
-                frame[idx + 3] = 255;         // A
+    // Draw background if selected
+    if selected {
+        let text_width = text.len() * 8;
+        let text_height = 12;
+        for py in y..y + text_height {
+            for px in x..x + text_width {
+                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
+                    let index = (py * WINDOW_WIDTH + px) * 4;
+                    if index + 3 < frame.len() {
+                        frame[index] = bg_color[0];
+                        frame[index + 1] = bg_color[1];
+                        frame[index + 2] = bg_color[2];
+                    }
+                }
             }
         }
     }
     
-    // Simple text rendering - draw pixels for each character
+    // Draw text characters
     for (i, ch) in text.chars().enumerate() {
-        let char_x = x + i * 8;
-        draw_simple_char(frame, ch, char_x, y + 2, text_color);
+        draw_simple_char(frame, ch, x + i * 8, y, color);
     }
 }
 
 fn draw_simple_char(frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3]) {
-    // Improved character rendering with more complete patterns
-    let patterns = match ch {
-        'A' | 'a' => vec![
-            [0,1,1,0],
-            [1,0,0,1],
-            [1,1,1,1],
-            [1,0,0,1],
+    // 8x12 bitmap font patterns (same as square_menu for consistency)
+    let pattern = match ch {
+        'A' | 'a' => [
+            0b01110000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b11111000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'B' | 'b' => vec![
-            [1,1,1,0],
-            [1,0,0,1],
-            [1,1,1,0],
-            [1,1,1,1],
+        'B' | 'b' => [
+            0b11110000,
+            0b10001000,
+            0b10001000,
+            0b11110000,
+            0b11110000,
+            0b10001000,
+            0b10001000,
+            0b11110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'C' | 'c' => vec![
-            [0,1,1,1],
-            [1,0,0,0],
-            [1,0,0,0],
-            [0,1,1,1],
+        'C' | 'c' => [
+            0b01110000,
+            0b10001000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'D' | 'd' => vec![
-            [1,1,1,0],
-            [1,0,0,1],
-            [1,0,0,1],
-            [1,1,1,0],
+        'D' | 'd' => [
+            0b11110000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b11110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'E' | 'e' => vec![
-            [1,1,1,1],
-            [1,0,0,0],
-            [1,1,1,0],
-            [1,1,1,1],
+        'E' | 'e' => [
+            0b11111000,
+            0b10000000,
+            0b10000000,
+            0b11110000,
+            0b11110000,
+            0b10000000,
+            0b10000000,
+            0b11111000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'F' | 'f' => vec![
-            [1,1,1,1],
-            [1,0,0,0],
-            [1,1,1,0],
-            [1,0,0,0],
+        'F' | 'f' => [
+            0b11111000,
+            0b10000000,
+            0b10000000,
+            0b11110000,
+            0b11110000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'G' | 'g' => vec![
-            [0,1,1,1],
-            [1,0,0,0],
-            [1,0,1,1],
-            [0,1,1,1],
+        'G' | 'g' => [
+            0b01110000,
+            0b10001000,
+            0b10000000,
+            0b10000000,
+            0b10111000,
+            0b10001000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'H' | 'h' => vec![
-            [1,0,0,1],
-            [1,0,0,1],
-            [1,1,1,1],
-            [1,0,0,1],
+        'H' | 'h' => [
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b11111000,
+            0b11111000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'I' | 'i' => vec![
-            [1,1,1,1],
-            [0,1,1,0],
-            [0,1,1,0],
-            [1,1,1,1],
+        'I' | 'i' => [
+            0b01110000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'K' | 'k' => vec![
-            [1,0,0,1],
-            [1,0,1,0],
-            [1,1,0,0],
-            [1,0,1,1],
+        'L' | 'l' => [
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b11111000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'L' | 'l' => vec![
-            [1,0,0,0],
-            [1,0,0,0],
-            [1,0,0,0],
-            [1,1,1,1],
+        'M' | 'm' => [
+            0b10001000,
+            0b11011000,
+            0b10101000,
+            0b10101000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'M' | 'm' => vec![
-            [1,0,0,1],
-            [1,1,1,1],
-            [1,0,0,1],
-            [1,0,0,1],
+        'N' | 'n' => [
+            0b10001000,
+            0b11001000,
+            0b10101000,
+            0b10101000,
+            0b10011000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'N' | 'n' => vec![
-            [1,0,0,1],
-            [1,1,0,1],
-            [1,0,1,1],
-            [1,0,0,1],
+        'O' | 'o' => [
+            0b01110000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'O' | 'o' => vec![
-            [0,1,1,0],
-            [1,0,0,1],
-            [1,0,0,1],
-            [0,1,1,0],
+        'P' | 'p' => [
+            0b11110000,
+            0b10001000,
+            0b10001000,
+            0b11110000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b10000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'P' | 'p' => vec![
-            [1,1,1,0],
-            [1,0,0,1],
-            [1,1,1,0],
-            [1,0,0,0],
+        'R' | 'r' => [
+            0b11110000,
+            0b10001000,
+            0b10001000,
+            0b11110000,
+            0b10100000,
+            0b10010000,
+            0b10001000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'R' | 'r' => vec![
-            [1,1,1,0],
-            [1,0,0,1],
-            [1,1,1,0],
-            [1,0,0,1],
+        'S' | 's' => [
+            0b01111000,
+            0b10000000,
+            0b10000000,
+            0b01110000,
+            0b00001000,
+            0b00001000,
+            0b00001000,
+            0b11110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'S' | 's' => vec![
-            [0,1,1,1],
-            [1,0,0,0],
-            [0,1,1,0],
-            [1,1,1,0],
+        'T' | 't' => [
+            0b11111000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'T' | 't' => vec![
-            [1,1,1,1],
-            [0,1,1,0],
-            [0,1,1,0],
-            [0,1,1,0],
+        'U' | 'u' => [
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'U' | 'u' => vec![
-            [1,0,0,1],
-            [1,0,0,1],
-            [1,0,0,1],
-            [0,1,1,0],
+        'V' | 'v' => [
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b01010000,
+            0b01010000,
+            0b00100000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        'W' | 'w' => vec![
-            [1,0,0,1],
-            [1,0,0,1],
-            [1,1,1,1],
-            [1,0,0,1],
+        'W' | 'w' => [
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10001000,
+            0b10101000,
+            0b10101000,
+            0b11011000,
+            0b10001000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        ' ' => vec![
-            [0,0,0,0],
-            [0,0,0,0],
-            [0,0,0,0],
-            [0,0,0,0],
+        '0' => [
+            0b01110000,
+            0b10001000,
+            0b10011000,
+            0b10101000,
+            0b11001000,
+            0b10001000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '-' => vec![
-            [0,0,0,0],
-            [0,0,0,0],
-            [1,1,1,1],
-            [0,0,0,0],
+        '1' => [
+            0b00100000,
+            0b01100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b00100000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '(' => vec![
-            [0,1,0,0],
-            [1,0,0,0],
-            [1,0,0,0],
-            [0,1,0,0],
+        '2' => [
+            0b01110000,
+            0b10001000,
+            0b00001000,
+            0b00010000,
+            0b00100000,
+            0b01000000,
+            0b10000000,
+            0b11111000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        ')' => vec![
-            [0,0,1,0],
-            [0,0,0,1],
-            [0,0,0,1],
-            [0,0,1,0],
+        '3' => [
+            0b01110000,
+            0b10001000,
+            0b00001000,
+            0b00110000,
+            0b00001000,
+            0b00001000,
+            0b10001000,
+            0b01110000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '0' => vec![
-            [0,1,1,0],
-            [1,0,0,1],
-            [1,0,0,1],
-            [0,1,1,0],
+        ' ' => [0; 12],
+        ':' => [
+            0b00000000,
+            0b00000000,
+            0b01100000,
+            0b01100000,
+            0b00000000,
+            0b01100000,
+            0b01100000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '1' => vec![
-            [0,1,0,0],
-            [1,1,0,0],
-            [0,1,0,0],
-            [1,1,1,0],
+        '(' => [
+            0b00010000,
+            0b00100000,
+            0b01000000,
+            0b01000000,
+            0b01000000,
+            0b01000000,
+            0b00100000,
+            0b00010000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '2' => vec![
-            [1,1,1,0],
-            [0,0,0,1],
-            [0,1,1,0],
-            [1,1,1,1],
+        ')' => [
+            0b01000000,
+            0b00100000,
+            0b00010000,
+            0b00010000,
+            0b00010000,
+            0b00010000,
+            0b00100000,
+            0b01000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '3' => vec![
-            [1,1,1,0],
-            [0,0,0,1],
-            [0,1,1,0],
-            [1,1,1,0],
+        ',' => [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b01100000,
+            0b01100000,
+            0b00100000,
+            0b01000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        '5' => vec![
-            [1,1,1,1],
-            [1,0,0,0],
-            [1,1,1,0],
-            [1,1,1,0],
+        '-' => [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b11111000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
-        _ => vec![
-            [1,1,1,1],
-            [1,0,0,1],
-            [1,0,0,1],
-            [1,1,1,1],
+        '+' => [
+            0b00000000,
+            0b00000000,
+            0b00100000,
+            0b00100000,
+            0b11111000,
+            0b00100000,
+            0b00100000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
         ],
+        '.' => [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b01100000,
+            0b01100000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+        ],
+        _ => [0; 12], // Default to empty for unknown characters
     };
     
-    for (row, pattern) in patterns.iter().enumerate() {
-        for (col, &pixel) in pattern.iter().enumerate() {
-            if pixel == 1 {
+    for (row, &byte) in pattern.iter().enumerate() {
+        for col in 0..8 {
+            if byte & (0x80 >> col) != 0 {
                 let px = x + col;
                 let py = y + row;
                 if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                    let idx = (py * WINDOW_WIDTH + px) * 4;
-                    frame[idx] = color[0];     // R
-                    frame[idx + 1] = color[1]; // G
-                    frame[idx + 2] = color[2]; // B
-                    frame[idx + 3] = 255;      // A
+                    let index = (py * WINDOW_WIDTH + px) * 4;
+                    if index + 3 < frame.len() {
+                        frame[index] = color[0];     // R
+                        frame[index + 1] = color[1]; // G
+                        frame[index + 2] = color[2]; // B
+                        frame[index + 3] = 255;      // A
+                    }
                 }
             }
         }
@@ -729,6 +1039,56 @@ fn draw_color_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_opti
         
         draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
     }
+}
+
+fn draw_relative_speed_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_ball: usize, speed_ratio: f32, balls: &[Ball]) {
+    let menu_width = 250;
+    let menu_height = 120;
+    
+    // Position menu to the right of the ball, but keep it on screen
+    let mut menu_x = ball_x * CELL_SIZE + CELL_SIZE;
+    let mut menu_y = ball_y * CELL_SIZE;
+    
+    // Adjust if menu would go off screen
+    if menu_x + menu_width > WINDOW_WIDTH {
+        menu_x = ball_x * CELL_SIZE - menu_width;
+    }
+    if menu_y + menu_height > WINDOW_HEIGHT {
+        menu_y = WINDOW_HEIGHT - menu_height;
+    }
+    
+    draw_menu_background(frame, menu_x, menu_y, menu_width, menu_height);
+    draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
+    
+    // Title
+    draw_text(frame, "Relative Speed:", menu_x + 10, menu_y + 10, [255, 255, 255], false);
+    
+    // Reference ball selection
+    let reference_text = if let Some(ref_ball) = balls.get(selected_ball) {
+        format!("Reference: Ball {} ({:.1} u/s)", selected_ball, ref_ball.speed)
+    } else {
+        "Reference: No ball selected".to_string()
+    };
+    draw_text(frame, &reference_text, menu_x + 10, menu_y + 30, [200, 200, 200], false);
+    
+    // Speed ratio display
+    let ratio_index = RELATIVE_SPEED_RATIOS.iter().position(|&r| (r - speed_ratio).abs() < 0.001).unwrap_or(4);
+    let ratio_label = RELATIVE_SPEED_LABELS.get(ratio_index).unwrap_or(&"1x");
+    let ratio_text = format!("Ratio: {}", ratio_label);
+    draw_text(frame, &ratio_text, menu_x + 10, menu_y + 50, [255, 255, 0], false);
+    
+    // Calculated speed display
+    if let Some(ref_ball) = balls.get(selected_ball) {
+        let calculated_speed = ref_ball.speed * speed_ratio;
+        let clamped_speed = calculated_speed.clamp(MIN_SPEED, MAX_SPEED);
+        let speed_text = format!("Result: {:.1} u/s", clamped_speed);
+        let color = if calculated_speed != clamped_speed { [255, 100, 100] } else { [100, 255, 100] };
+        draw_text(frame, &speed_text, menu_x + 10, menu_y + 70, color, false);
+    }
+    
+    // Instructions
+    draw_text(frame, "Up/Down: ball, Left/Right: ratio", menu_x + 10, menu_y + 90, [180, 180, 180], false);
+    draw_text(frame, "Space: apply, Esc: back", menu_x + 10, menu_y + 105, [180, 180, 180], false);
 }
 
 fn get_color_rgb(color_name: &str) -> [u8; 3] {

@@ -5,6 +5,9 @@ mod ball;
 mod square;
 mod programmer;
 mod square_menu;
+mod library;
+mod library_gui;
+mod program_editor;
 
 use audio_engine::AudioEngine;
 use sequencer::run_sequencer;
@@ -29,14 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Arrow keys: Move cursor");
     println!("  S: Place/remove square");
     println!("  C: Place ball (starts inactive)");
-    println!("  P: Toggle ball movement (start all balls / reset to original positions)");
+    println!("  P: Start balls (auto-saves state) / Reset to saved state");
     println!("  Space: Open ball context menu (when cursor is on a ball)");
     println!("  R: Open square programming menu (when cursor is on a square)");
     println!("  ESC: Close/go back in context menu");
     println!();
     println!("Ball Physics:");
     println!("  - Balls start inactive when placed");
-    println!("  - Press P to start/stop all balls");
+    println!("  - Press P to start balls (auto-saves current state)");
+    println!("  - Press P again to reset to saved state");
     println!("  - Default direction: Up, speed: 200ms");
     println!("  - Balls reverse direction when hitting squares");
     println!();
