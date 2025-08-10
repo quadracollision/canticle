@@ -323,15 +323,18 @@ impl SimpleProgramParser {
                 }
                 i += 1;
                 continue;
-            } else if current_line == "return" || current_line.starts_with("if ") || current_line.starts_with("def ") {
+            } else if current_line.starts_with("if ") || current_line.starts_with("def ") || current_line == "end" {
                 // End of if block without explicit then
                 break;
+            } else if current_line == "return" || current_line.starts_with("return ") {
+                // Return statement should not be part of the if block - stop parsing if block
+                break;
             } else {
-                // Parse instruction and continue looking for 'and' or 'then'
+                // Parse instruction as part of the if block
                 if let Ok(instruction) = self.parse_line(current_line) {
                     then_block.push(instruction);
                     i += 1;
-                    // Don't break here - continue to look for 'and' or 'then'
+                    // Continue parsing all instructions as part of the if block
                 } else {
                     return Err(format!("Failed to parse instruction in if block: {}", current_line));
                 }
@@ -375,6 +378,11 @@ impl SimpleProgramParser {
         // Handle "set" statements
         if line.starts_with("set ") {
             return self.parse_set_statement(line);
+        }
+        
+        // Handle "print" statements
+        if line.starts_with("print ") {
+            return self.parse_print_statement(line);
         }
         
         // Note: 'reverse sample of' syntax has been removed
@@ -438,7 +446,7 @@ impl SimpleProgramParser {
     }
     
     fn parse_set_statement(&self, line: &str) -> Result<Instruction, String> {
-        // Parse "set speed +0.1" or "set speed 2.0"
+        // Parse "set speed +0.1", "set speed 2.0", or "set speed variable_name"
         let parts: Vec<&str> = line.split_whitespace().collect();
         
         if parts.len() >= 3 && parts[0] == "set" {
@@ -459,26 +467,31 @@ impl SimpleProgramParser {
                             }));
                         }
                     } else {
-                        // Absolute speed change
-                        if let Ok(speed) = speed_str.parse::<f32>() {
-                            return Ok(Instruction::SetSpeed(Expression::Literal(Value::Number(speed))));
-                        }
+                        // Absolute speed change - use coordinate expression parser to handle variables
+                        let speed_expr = self.parse_coordinate_expression(speed_str)?;
+                        return Ok(Instruction::SetSpeed(speed_expr));
                     }
                 }
                 "direction" => {
                     if parts.len() >= 3 {
-                        let direction = match parts[2] {
-                            "up" => Direction::Up,
-                            "down" => Direction::Down,
-                            "left" => Direction::Left,
-                            "right" => Direction::Right,
-                            "up-left" => Direction::UpLeft,
-                            "up-right" => Direction::UpRight,
-                            "down-left" => Direction::DownLeft,
-                            "down-right" => Direction::DownRight,
-                            _ => return Err(format!("Unknown direction: {}", parts[2])),
+                        let direction_str = parts[2];
+                        
+                        // Try to parse as a literal direction first
+                        let direction_expr = match direction_str {
+                            "up" => Expression::Literal(Value::Direction(Direction::Up)),
+                            "down" => Expression::Literal(Value::Direction(Direction::Down)),
+                            "left" => Expression::Literal(Value::Direction(Direction::Left)),
+                            "right" => Expression::Literal(Value::Direction(Direction::Right)),
+                            "up-left" => Expression::Literal(Value::Direction(Direction::UpLeft)),
+                            "up-right" => Expression::Literal(Value::Direction(Direction::UpRight)),
+                            "down-left" => Expression::Literal(Value::Direction(Direction::DownLeft)),
+                            "down-right" => Expression::Literal(Value::Direction(Direction::DownRight)),
+                            _ => {
+                                // If not a literal direction, try to parse as an expression (variable)
+                                self.parse_coordinate_expression(direction_str)?
+                            }
                         };
-                        return Ok(Instruction::SetDirection(Expression::Literal(Value::Direction(direction))));
+                        return Ok(Instruction::SetDirection(direction_expr));
                     }
                 }
                 "reverse" => {
@@ -487,16 +500,55 @@ impl SimpleProgramParser {
                         let ball_reference = parts[2].to_string();
                         let speed_str = parts[3];
                         
-                        if let Ok(speed) = speed_str.parse::<f32>() {
-                            return Ok(Instruction::SetReverse {
-                                ball_reference,
-                                speed: Expression::Literal(Value::Number(speed)),
-                            });
-                        } else {
-                            return Err(format!("Invalid speed value: {}", speed_str));
-                        }
+                        let speed_expr = self.parse_coordinate_expression(speed_str)?;
+                        return Ok(Instruction::SetReverse {
+                            ball_reference,
+                            speed: speed_expr,
+                        });
                     } else {
                         return Err("Invalid reverse statement format. Expected: set reverse ball_reference speed".to_string());
+                    }
+                }
+                "pitch" => {
+                    if parts.len() >= 3 {
+                        let pitch_str = parts[2];
+                        
+                        // Handle musical notes (C, C#, D, D#, E, F, F#, G, G#, A, A#, B)
+                        let pitch_expr = match pitch_str {
+                            "C" => Expression::Literal(Value::Number(0.5)),    // C (low)
+                            "C#" | "Db" => Expression::Literal(Value::Number(0.53)), 
+                            "D" => Expression::Literal(Value::Number(0.56)),
+                            "D#" | "Eb" => Expression::Literal(Value::Number(0.59)),
+                            "E" => Expression::Literal(Value::Number(0.63)),
+                            "F" => Expression::Literal(Value::Number(0.67)),
+                            "F#" | "Gb" => Expression::Literal(Value::Number(0.71)),
+                            "G" => Expression::Literal(Value::Number(0.75)),
+                            "G#" | "Ab" => Expression::Literal(Value::Number(0.79)),
+                            "A" => Expression::Literal(Value::Number(0.84)),
+                            "A#" | "Bb" => Expression::Literal(Value::Number(0.89)),
+                            "B" => Expression::Literal(Value::Number(0.94)),
+                            _ => {
+                                // Check if it starts with + or - for relative change
+                                if pitch_str.starts_with('+') || pitch_str.starts_with('-') {
+                                    // Relative pitch change
+                                    if let Ok(change) = pitch_str.parse::<f32>() {
+                                        Expression::BinaryOp {
+                                            left: Box::new(Expression::BallProperty(BallProperty::Pitch)),
+                                            op: BinaryOperator::Add,
+                                            right: Box::new(Expression::Literal(Value::Number(change))),
+                                        }
+                                    } else {
+                                        return Err(format!("Invalid pitch change value: {}", pitch_str));
+                                    }
+                                } else {
+                                    // Absolute pitch change - use coordinate expression parser to handle variables
+                                    self.parse_coordinate_expression(pitch_str)?
+                                }
+                            }
+                        };
+                        return Ok(Instruction::SetPitch(pitch_expr));
+                    } else {
+                        return Err("Invalid pitch statement format. Expected: set pitch <value|note>".to_string());
                     }
                 }
                 _ => return Err(format!("Unknown property: {}", property)),
@@ -840,6 +892,57 @@ impl SimpleProgramParser {
         
         Err("Invalid destroy statement format. Expected: destroy ball(x,y), destroy ball(self), or destroy square(x,y)".to_string())
     }
+    
+    fn parse_print_statement(&self, line: &str) -> Result<Instruction, String> {
+        // Parse "print expression" or "print hits(target)"
+        let content = &line[6..].trim(); // Remove "print "
+        
+        if content.is_empty() {
+            return Err("Print statement requires an expression".to_string());
+        }
+        
+        let expr = self.parse_print_expression(content)?;
+        Ok(Instruction::Print(expr))
+    }
+    
+    fn parse_print_expression(&self, expr_str: &str) -> Result<Expression, String> {
+        // Check if it's a hits() function call
+        if expr_str.starts_with("hits(") && expr_str.ends_with(")") {
+            let target_str = &expr_str[5..expr_str.len()-1].trim(); // Remove "hits(" and ")"
+            return self.parse_hits_function(target_str);
+        }
+        
+        // Otherwise parse as a regular expression
+        self.parse_coordinate_expression(expr_str)
+    }
+    
+    fn parse_hits_function(&self, target: &str) -> Result<Expression, String> {
+        // Parse hits(self), hits(c_red), hits(square(3, 5)), etc.
+        if target == "self" {
+            // Return hits for current square
+            return Ok(Expression::Variable("__square_hits".to_string()));
+        }
+        
+        // Check if it's a color reference like c_red
+        if target.starts_with("c_") {
+            let _validated_color = self.validate_color(target)?;
+            return Ok(Expression::Variable(format!("__ball_hits_{}", target)));
+        }
+        
+        // Check if it's a square coordinate reference like square(3, 5)
+        if target.starts_with("square(") && target.ends_with(")") {
+            let coords_str = &target[7..target.len()-1]; // Remove "square(" and ")"
+            let coords: Vec<&str> = coords_str.split(',').map(|s| s.trim()).collect();
+            
+            if coords.len() == 2 {
+                if let (Ok(x), Ok(y)) = (coords[0].parse::<i32>(), coords[1].parse::<i32>()) {
+                    return Ok(Expression::Variable(format!("__square_hits_{}_{}", x, y)));
+                }
+            }
+        }
+        
+        Err(format!("Invalid hits() target: {}", target))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -885,15 +988,26 @@ impl ProgramExecutor {
         let ball_color_square_key = (ball_color.clone(), square_x, square_y);
         *self.state.ball_color_square_hits.entry(ball_color_square_key.clone()).or_insert(0) += 1;
         
-        // Create execution context
+        // Debug logging
+        let ball_hits = *self.state.ball_hit_counts.get(&ball_color).unwrap();
+        let square_hits = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
+        println!("DEBUG: Ball color {:?} hits: {}, Square ({},{}) hits: {}", ball_color, ball_hits, square_x, square_y, square_hits);
+        
+        // Create execution context with the updated hit counts
+        let current_ball_hit_count = *self.state.ball_color_square_hits.get(&ball_color_square_key).unwrap();
+        let current_square_hit_count = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
+        
         let mut context = ExecutionContext {
             variables: self.state.variables.clone(),
-            ball_hit_count: *self.state.ball_color_square_hits.get(&ball_color_square_key).unwrap_or(&0),
-            square_hit_count: *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap_or(&0),
+            ball_hit_count: current_ball_hit_count,
+            square_hit_count: current_square_hit_count,
             ball_x: ball.x,
             ball_y: ball.y,
             ball_speed: ball.speed,
             ball_direction: ball.direction,
+            ball_pitch: ball.pitch,
+            square_x,
+            square_y,
         };
         
         // Execute the program
@@ -928,6 +1042,11 @@ impl ProgramExecutor {
                 Instruction::SetDirection(expr) => {
                     if let Value::Direction(dir) = self.evaluate_expression(expr, context) {
                         actions.push(ProgramAction::SetDirection(dir));
+                    }
+                }
+                Instruction::SetPitch(expr) => {
+                    if let Value::Number(pitch) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetPitch(pitch));
                     }
                 }
                 Instruction::Bounce => {
@@ -1084,6 +1203,16 @@ impl ProgramExecutor {
                     actions.push(ProgramAction::Return(function_name.clone()));
                     break; // Exit the instruction loop immediately
                 }
+                Instruction::Print(expr) => {
+                    let val = self.evaluate_expression(expr, context);
+                    let display_text = match val {
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Direction(d) => format!("{:?}", d),
+                        Value::String(s) => s,
+                    };
+                    actions.push(ProgramAction::Print(display_text));
+                }
                 Instruction::End => {
                     actions.push(ProgramAction::End);
                     break; // Exit the instruction loop immediately
@@ -1099,6 +1228,34 @@ impl ProgramExecutor {
         match expr {
             Expression::Literal(value) => value.clone(),
             Expression::Variable(name) => {
+                // Handle special hit count variables
+                if name == "__square_hits" {
+                    // Return hits for current square
+                    let hits = self.state.square_hit_counts.get(&(context.square_x, context.square_y)).unwrap_or(&0);
+                    println!("DEBUG: __square_hits for ({},{}) = {}", context.square_x, context.square_y, hits);
+                    return Value::Number(*hits as f32);
+                }
+                
+                if name.starts_with("__ball_hits_c_") {
+                    // Return hits for specific ball color (global)
+                    let color = &name[14..]; // Remove "__ball_hits_c_" prefix
+                    let hits = self.state.ball_hit_counts.get(color).unwrap_or(&0);
+                    return Value::Number(*hits as f32);
+                }
+                
+                if name.starts_with("__square_hits_") {
+                    // Return hits for specific square coordinates
+                    let coords_str = &name[15..]; // Remove "__square_hits_" prefix
+                    if let Some(underscore_pos) = coords_str.find('_') {
+                        let x_str = &coords_str[..underscore_pos];
+                        let y_str = &coords_str[underscore_pos + 1..];
+                        if let (Ok(x), Ok(y)) = (x_str.parse::<usize>(), y_str.parse::<usize>()) {
+                            let hits = self.state.square_hit_counts.get(&(x, y)).unwrap_or(&0);
+                            return Value::Number(*hits as f32);
+                        }
+                    }
+                }
+                
                 context.variables.get(name).cloned().unwrap_or(Value::Number(0.0))
             }
             Expression::BinaryOp { left, op, right } => {
@@ -1113,6 +1270,7 @@ impl ProgramExecutor {
                     BallProperty::X => Value::Number(context.ball_x),
                     BallProperty::Y => Value::Number(context.ball_y),
                     BallProperty::HitCount => Value::Number(context.ball_hit_count as f32),
+                    BallProperty::Pitch => Value::Number(context.ball_pitch),
                 }
             }
             Expression::Random { min, max } => {

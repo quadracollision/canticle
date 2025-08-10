@@ -113,6 +113,63 @@ impl AudioChannel {
         Ok(())
     }
     
+    pub fn play_file_with_pitch(&self, file_path: &str, pitch: f32) -> Result<()> {
+        if self.muted {
+            return Ok(());
+        }
+        
+        // Try to resolve the file path - check if it's absolute or relative
+        let resolved_path = if std::path::Path::new(file_path).is_absolute() {
+            file_path.to_string()
+        } else {
+            // For relative paths, try multiple locations
+            let current_dir = std::env::current_dir().unwrap_or_default();
+            let libraries_path = current_dir.join("libraries").join(file_path);
+            let direct_path = current_dir.join(file_path);
+            
+            if libraries_path.exists() {
+                libraries_path.to_string_lossy().to_string()
+            } else if direct_path.exists() {
+                direct_path.to_string_lossy().to_string()
+            } else {
+                // If file doesn't exist in expected locations, try the original path anyway
+                file_path.to_string()
+            }
+        };
+        
+        // Validate and clamp pitch to safe range to prevent audio engine failures
+        let safe_pitch = pitch.clamp(0.1, 10.0); // Clamp between 0.1x and 10x speed
+        if safe_pitch != pitch {
+            log::warn!("Pitch {} clamped to safe range: {}", pitch, safe_pitch);
+        }
+        
+        log::info!("Attempting to play audio file with pitch {}: {}", safe_pitch, resolved_path);
+        
+        let file = File::open(&resolved_path).map_err(|e| {
+            log::error!("Failed to open audio file '{}': {}", resolved_path, e);
+            e
+        })?;
+        let source = Decoder::new(BufReader::new(file))?;
+        let amplified_source = source.amplify(self.volume);
+        // Apply pitch adjustment using speed transformation
+        let pitched_source = amplified_source.speed(safe_pitch);
+        
+        // Try to find an available sink in the pool for simultaneous playback
+        for sink in &self.sink_pool {
+            if sink.empty() {
+                sink.append(pitched_source);
+                log::info!("Audio playing on pool sink with pitch {}: {}", safe_pitch, resolved_path);
+                return Ok(());
+            }
+        }
+        
+        // If no sink is available, use the main sink (this will interrupt current playback)
+        self.sink.stop();
+        self.sink.append(pitched_source);
+        log::info!("Audio playing on main sink with pitch {}: {}", safe_pitch, resolved_path);
+        Ok(())
+    }
+    
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 2.0);
         self.sink.set_volume(self.volume);
@@ -185,24 +242,17 @@ impl AudioEngine {
     }
     
     pub fn play_on_channel(&self, channel_id: u32, file_path: &str) -> Result<()> {
-        // Increment active sample counter for performance monitoring
-        {
-            let mut active = self.active_samples.lock().unwrap();
-            *active += 1;
-            
-            // Log warning if too many samples are playing simultaneously
-            if *active > 10 {
-                log::warn!("High audio load: {} samples playing simultaneously", *active);
-            }
-        }
-        
+        self.play_on_channel_with_pitch(channel_id, file_path, 1.0)
+    }
+    
+    pub fn play_on_channel_with_pitch(&self, channel_id: u32, file_path: &str, pitch: f32) -> Result<()> {
         let channels = self.channels.lock().unwrap();
         let channel = channels.get(&channel_id)
             .ok_or(AudioError::ChannelNotFound(channel_id))?;
         
-        channel.play_file(file_path)?;
-        log::info!("Playing {} on channel {} (active samples: {})", 
-                  file_path, channel_id, self.get_active_sample_count());
+        channel.play_file_with_pitch(file_path, pitch)?;
+        log::info!("Playing {} on channel {} with pitch {} (active samples: {})", 
+                  file_path, channel_id, pitch, self.get_active_sample_count());
         Ok(())
     }
     
@@ -300,27 +350,25 @@ impl AudioEngine {
     }
     
     pub fn cleanup_finished_samples(&self) {
-        // Decrement counter for finished samples
+        // Reset the active sample counter by counting only currently playing samples
         let channels = self.channels.lock().unwrap();
-        let mut finished_count = 0;
+        let mut currently_playing = 0;
         
         for channel in channels.values() {
-            // Count finished sinks in the pool
+            // Count non-empty sinks in the pool
             for sink in &channel.sink_pool {
-                if sink.empty() {
-                    finished_count += 1;
+                if !sink.empty() {
+                    currently_playing += 1;
                 }
             }
-            if channel.sink.empty() {
-                finished_count += 1;
+            if !channel.sink.empty() {
+                currently_playing += 1;
             }
         }
         
-        // Update active sample counter (conservative approach)
+        // Update active sample counter to reflect actual playing samples
         let mut active = self.active_samples.lock().unwrap();
-        if *active > 0 {
-            *active = (*active).saturating_sub(finished_count / 10); // Conservative cleanup
-        }
+        *active = currently_playing;
     }
     
     // Cache management for better performance

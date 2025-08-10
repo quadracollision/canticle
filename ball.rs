@@ -25,6 +25,7 @@ pub struct Ball {
     pub last_grid_x: usize,
     pub last_grid_y: usize,
     pub color: String,
+    pub pitch: f32, // Pitch multiplier (1.0 = normal, 2.0 = octave up, 0.5 = octave down)
 }
 
 impl Ball {
@@ -41,6 +42,7 @@ impl Ball {
             last_grid_x: x,
             last_grid_y: y,
             color: "White".to_string(), // Default color
+            pitch: 1.0, // Default pitch (normal)
         }
     }
     
@@ -148,9 +150,10 @@ impl Ball {
     pub fn reset_to_original(&mut self) {
         self.x = self.original_x;
         self.y = self.original_y;
-        self.last_grid_x = self.original_x.floor() as usize;
-        self.last_grid_y = self.original_y.floor() as usize;
+        self.last_grid_x = self.original_x as usize;
+        self.last_grid_y = self.original_y as usize;
         self.active = false;
+        self.pitch = 1.0; // Reset pitch to normal
     }
     
     pub fn set_direction(&mut self, direction: Direction) {
@@ -179,5 +182,9 @@ impl Ball {
     
     pub fn deactivate(&mut self) {
         self.active = false;
+    }
+    
+    pub fn set_pitch(&mut self, pitch: f32) {
+        self.pitch = pitch.max(0.1).min(4.0); // Clamp pitch between 0.1x and 4.0x
     }
 }

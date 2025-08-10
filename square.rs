@@ -35,6 +35,7 @@ pub enum BallProperty {
     X,
     Y,
     HitCount,
+    Pitch,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -48,6 +49,7 @@ pub enum Instruction {
     // Ball manipulation
     SetSpeed(Expression),
     SetDirection(Expression),
+    SetPitch(Expression),
     Bounce,
     Stop,
     
@@ -477,6 +479,9 @@ pub struct ExecutionContext {
     pub ball_y: f32,
     pub ball_speed: f32,
     pub ball_direction: crate::ball::Direction,
+    pub ball_pitch: f32,
+    pub square_x: usize,
+    pub square_y: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -625,6 +630,11 @@ impl SquareProgram {
                 Instruction::SetDirection(expr) => {
                     if let Value::Direction(dir) = self.evaluate_expression(expr, context) {
                         actions.push(ProgramAction::SetDirection(dir));
+                    }
+                }
+                Instruction::SetPitch(expr) => {
+                    if let Value::Number(pitch) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetPitch(pitch));
                     }
                 }
                 Instruction::Bounce => {
@@ -798,7 +808,13 @@ impl SquareProgram {
                 }
                 Instruction::Print(expr) => {
                     let val = self.evaluate_expression(expr, context);
-                    actions.push(ProgramAction::Print(format!("{:?}", val)));
+                    let display_text = match val {
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Direction(d) => format!("{:?}", d),
+                        Value::String(s) => s,
+                    };
+                    actions.push(ProgramAction::Print(display_text));
                 }
                 Instruction::ExecuteProgram(program) => {
                     actions.push(ProgramAction::ExecuteProgram(program.clone()));
@@ -843,6 +859,7 @@ impl SquareProgram {
                     BallProperty::X => Value::Number(context.ball_x),
                     BallProperty::Y => Value::Number(context.ball_y),
                     BallProperty::HitCount => Value::Number(context.ball_hit_count as f32),
+                    BallProperty::Pitch => Value::Number(context.ball_pitch),
                 }
             }
             Expression::Random { min, max } => {
@@ -889,6 +906,7 @@ impl SquareProgram {
 pub enum ProgramAction {
     SetSpeed(f32),
     SetDirection(crate::ball::Direction),
+    SetPitch(f32),
     Bounce,
     Stop,
     PlaySample(usize),
@@ -919,6 +937,7 @@ pub struct Cell {
     pub content: CellContent,
     pub color: [u8; 3], // RGB color
     pub program: SquareProgram, // Programming for square effects
+    pub display_text: Option<String>, // Text to display on the square
 }
 
 impl Default for Cell {
@@ -927,6 +946,7 @@ impl Default for Cell {
             content: CellContent::Empty,
             color: [100, 100, 100], // Default gray color
             program: SquareProgram::default(),
+            display_text: None,
         }
     }
 }
@@ -937,6 +957,7 @@ impl Cell {
             content: CellContent::Square,
             color,
             program: SquareProgram::default(),
+            display_text: None,
         }
     }
     
@@ -960,6 +981,7 @@ impl Cell {
         self.content = CellContent::Empty;
         self.color = [100, 100, 100];
         self.program = SquareProgram::default();
+        self.display_text = None;
     }
     
     pub fn place_square(&mut self, color: Option<[u8; 3]>) {

@@ -692,19 +692,7 @@ impl SequencerGrid {
                             self.collision_history.pop_front();
                         }
                         
-                        // Automatically play ball's audio sample on collision
-                        if let Some(ref sample_path) = ball.sample_path {
-                            let current_active = self.audio_engine.get_active_sample_count();
-                            if current_active < 12 { // Conservative limit
-                                if let Err(e) = self.audio_engine.play_on_channel(0, sample_path) {
-                                    all_log_messages.push(format!("Failed to play ball audio on collision: {}", e));
-                                } else {
-                                    all_log_messages.push(format!("♪ Ball audio played: {}", sample_path.split('/').last().unwrap_or(sample_path).split('\\').last().unwrap_or(sample_path)));
-                                }
-                            } else {
-                                all_log_messages.push(format!("Ball audio skipped (audio load: {})", current_active));
-                            }
-                        }
+                        // Audio will be played after program actions are processed
                         
                         // Check cooldown before executing program
                         let can_execute = {
@@ -722,6 +710,11 @@ impl SequencerGrid {
                         };
                         
                         if can_execute {
+                            // Increment the square's own hit count
+                            self.cells[grid_y][grid_x].program.hit_count += 1;
+                            let new_hit_count = self.cells[grid_y][grid_x].program.hit_count;
+                            all_log_messages.push(format!("Square ({},{}) hit count incremented to: {}", grid_x, grid_y, new_hit_count));
+                            
                             let square_program = &self.cells[grid_y][grid_x].program;
                             if !square_program.programs.is_empty() {
                                 if let Some(active_program_index) = square_program.active_program {
@@ -739,17 +732,22 @@ impl SequencerGrid {
                                         }
                                         
                                         // Check if any action requires ball position reset
-                                        let mut should_reset_position = false;
-                                        let mut should_snap_to_grid_center = false;
-                                        let mut explicit_bounce = false;
-                                        
-                                        // Apply program actions to the ball
-                                        for action in actions {
+                        let mut should_reset_position = false;
+                        let mut should_snap_to_grid_center = false;
+                        let mut explicit_bounce = false;
+                        let mut collision_pitch = ball.pitch; // Start with ball's base pitch
+                        
+                        // Apply program actions to the ball
+                        for action in actions {
                                             match action {
                                                 ProgramAction::SetSpeed(speed) => {
                                                     all_log_messages.push(format!("  → SetSpeed: {}", speed));
                                                     ball.speed = speed.max(0.1); // Ensure minimum speed
                                                     should_reset_position = true;
+                                                }
+                                                ProgramAction::SetPitch(pitch) => {
+                                                    all_log_messages.push(format!("  → SetPitch: {} (collision-specific)", pitch));
+                                                    collision_pitch = pitch; // Apply pitch only for this collision
                                                 }
                                                 ProgramAction::Return(function_name) => {
                                                     if let Some(ref func_name) = function_name {
@@ -778,6 +776,9 @@ impl SequencerGrid {
                                                                 ball_y: ball.y,
                                                                 ball_speed: ball.speed,
                                                                 ball_direction: ball.direction,
+                                                                ball_pitch: ball.pitch,
+                                                                square_x: grid_x,
+                                                                square_y: grid_y,
                                                             };
                                                             
                                                             // Create a temporary SquareProgram to execute the function
@@ -799,6 +800,10 @@ impl SequencerGrid {
                                                                         all_log_messages.push(format!("    Function setting speed: {}", speed));
                                                                         ball.speed = speed.max(0.1);
                                                                         should_reset_position = true;
+                                                                    }
+                                                                    ProgramAction::SetPitch(pitch) => {
+                                                                        all_log_messages.push(format!("    Function setting pitch: {}", pitch));
+                                                                        ball.set_pitch(pitch);
                                                                     }
                                                                     ProgramAction::SetDirection(direction) => {
                                                                         all_log_messages.push(format!("    Function setting direction: {:?}", direction));
@@ -846,12 +851,12 @@ impl SequencerGrid {
                                                     should_reset_position = true;
                                                 }
                                                 ProgramAction::PlaySample(sample_index) => {
-                                                    all_log_messages.push(format!("  → PlaySample: {}", sample_index));
+                                                    all_log_messages.push(format!("  → PlaySample: {} with collision pitch {}", sample_index, collision_pitch));
                                                     if let Some(sample_path) = ball.sample_path.as_ref() {
                                                         // Check if we're approaching audio engine limits
                                                         let current_active = self.audio_engine.get_active_sample_count();
                                                         if current_active < 12 { // Conservative limit
-                                                            if let Err(e) = self.audio_engine.play_on_channel(sample_index as u32, sample_path) {
+                                                            if let Err(e) = self.audio_engine.play_on_channel_with_pitch(sample_index as u32, sample_path, collision_pitch) {
                                                                 eprintln!("Failed to play sample: {}", e);
                                                             }
                                                         } else {
@@ -959,6 +964,15 @@ impl SequencerGrid {
                                                         destroy_square_actions.push((x, y));
                                                     }
                                                 }
+                                                ProgramAction::Print(text) => {
+                                                    all_log_messages.push(format!("  → Print: {}", text));
+                                                    // Store the printed text on the current square for visual display
+                                                    if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                                                        if self.cells[grid_y][grid_x].content == CellContent::Square {
+                                                            self.cells[grid_y][grid_x].display_text = Some(text.clone());
+                                                        }
+                                                    }
+                                                }
                                                 ProgramAction::ExecuteLibraryFunction { library_function } => {
                                                     all_log_messages.push(format!("  → ExecuteLibraryFunction: {}", library_function));
                                                     
@@ -980,6 +994,9 @@ impl SequencerGrid {
                                                                 ball_y: ball.y,
                                                                 ball_speed: ball.speed,
                                                                 ball_direction: ball.direction,
+                                                                ball_pitch: ball.pitch,
+                                                                square_x: grid_x,
+                                                                square_y: grid_y,
                                                             };
                                                             // Create a temporary SquareProgram to execute the library function
                                                             let mut temp_square_program = crate::square::SquareProgram::new();
@@ -1023,6 +1040,9 @@ impl SequencerGrid {
                                                                     ball_y: ball.y,
                                                                     ball_speed: ball.speed,
                                                                     ball_direction: ball.direction,
+                                                                    ball_pitch: ball.pitch,
+                                                                    square_x: grid_x,
+                                                                    square_y: grid_y,
                                                                 };
                                                                 
                                                                 // Create a temporary SquareProgram to execute the function
@@ -1044,6 +1064,10 @@ impl SequencerGrid {
                                                                             all_log_messages.push(format!("      Function setting speed: {}", speed));
                                                                             ball.speed = speed.max(0.1);
                                                                             should_reset_position = true;
+                                                                        }
+                                                                        ProgramAction::SetPitch(pitch) => {
+                                                                            all_log_messages.push(format!("      Function setting pitch: {}", pitch));
+                                                                            ball.set_pitch(pitch);
                                                                         }
                                                                         ProgramAction::SetDirection(direction) => {
                                                                             all_log_messages.push(format!("      Function setting direction: {:?}", direction));
@@ -1090,6 +1114,20 @@ impl SequencerGrid {
                                                 _ => {
                                                     all_log_messages.push("  → Unknown action".to_string());
                                                 } // Handle other actions as needed
+                                            }
+                                        }
+                                        
+                                        // Play ball's audio sample after processing actions (using collision-specific pitch)
+                                        if let Some(ref sample_path) = ball.sample_path {
+                                            let current_active = self.audio_engine.get_active_sample_count();
+                                            if current_active < 12 { // Conservative limit
+                                                if let Err(e) = self.audio_engine.play_on_channel_with_pitch(0, sample_path, collision_pitch) {
+                                                    all_log_messages.push(format!("Failed to play ball audio on collision: {}", e));
+                                                } else {
+                                                    all_log_messages.push(format!("♪ Ball audio played with collision pitch {}: {}", collision_pitch, sample_path.split('/').last().unwrap_or(sample_path).split('\\').last().unwrap_or(sample_path)));
+                                                }
+                                            } else {
+                                                all_log_messages.push(format!("Ball audio skipped (audio load: {})", current_active));
                                             }
                                         }
                                         
@@ -1707,7 +1745,7 @@ impl SequencerUI {
             for x in 0..GRID_WIDTH {
                 let cell = &self.grid.cells[y][x];
                 match cell.content {
-                    CellContent::Square => Self::draw_square_static(frame, x, y, cell.color),
+                    CellContent::Square => Self::draw_square_static(frame, x, y, cell.color, &cell.display_text),
 
                     CellContent::Empty => {}
                 }
@@ -1821,7 +1859,7 @@ impl SequencerUI {
         }
     }
     
-    fn draw_square_static(frame: &mut [u8], grid_x: usize, grid_y: usize, color: [u8; 3]) {
+    fn draw_square_static(frame: &mut [u8], grid_x: usize, grid_y: usize, color: [u8; 3], display_text: &Option<String>) {
         let start_x = grid_x * CELL_SIZE + 2;
         let start_y = grid_y * CELL_SIZE + 2;
         let end_x = (grid_x + 1) * CELL_SIZE - 2;
@@ -1838,6 +1876,13 @@ impl SequencerUI {
                     }
                 }
             }
+        }
+        
+        // Draw display text if present
+        if let Some(text) = display_text {
+            let text_x = start_x + 4;
+            let text_y = start_y + 4;
+            font::draw_text(frame, text, text_x, text_y, [255, 255, 255], false, WINDOW_WIDTH);
         }
     }
     
