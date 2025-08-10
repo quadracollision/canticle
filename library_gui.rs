@@ -63,16 +63,17 @@ pub enum LibraryGuiAction {
     RenameItem { library_name: String, old_name: String, new_name: String, is_sample: bool },
     DeleteItem { library_name: String, item_name: String, is_sample: bool },
     CreateProgram { library_name: String, name: String, program: Program },
-    EditProgram { source: ProgramSource, name: String, program: Program },
+    EditProgram { source: ProgramSource, name: String, program: Program, raw_text: Vec<String> },
+    OpenSquareScript { x: usize, y: usize, program_index: usize },
     LoadSample { library_name: String },
 }
 
-const LIBRARY_GUI_WIDTH: usize = 400;
-const LIBRARY_GUI_HEIGHT: usize = 480;
-const COLUMN_WIDTH: usize = 190;
-const ITEM_HEIGHT: usize = 20;
-const HEADER_HEIGHT: usize = 30;
-const MAX_VISIBLE_ITEMS: usize = 20;
+const LIBRARY_GUI_WIDTH: usize = 580;
+const LIBRARY_GUI_HEIGHT: usize = 420;
+const COLUMN_WIDTH: usize = 280;
+const ITEM_HEIGHT: usize = 22;
+const HEADER_HEIGHT: usize = 40;
+const MAX_VISIBLE_ITEMS: usize = 16;
 
 pub struct LibraryGui {
     pub state: LibraryGuiState,
@@ -222,26 +223,28 @@ impl LibraryGui {
             }
         }
 
-        if input.key_pressed(VirtualKeyCode::Return) { // Edit program
+        if input.key_pressed(VirtualKeyCode::Return) { // Open program
             if matches!(selected_column, LibraryColumn::Programs) {
                 let all_programs = self.collect_all_programs(library_manager, grid);
-                 if let Some(program_entry) = all_programs.get(selected_item) {
-                     let script = self.program_to_source_code(&program_entry.program);
-                     editing_mode = Some(EditingMode::EditProgram {
-                         name: program_entry.name.clone(),
-                         source: program_entry.source.clone(),
-                         editor: ProgramEditor::new_with_text(script),
-                     });
-                 }
+                if let Some(program_entry) = all_programs.get(selected_item) {
+                    // For both square and library programs, use the editing mode
+                    let script = self.program_to_source_code(&program_entry.program);
+                    editing_mode = Some(EditingMode::EditProgram {
+                        name: program_entry.name.clone(),
+                        source: program_entry.source.clone(),
+                        editor: ProgramEditor::new_with_text(script),
+                    });
+                }
             }
         }
 
         if input.key_pressed(VirtualKeyCode::Space) && !input.held_shift() {
             match selected_column {
                 LibraryColumn::Programs => {
-                    // Edit existing program
+                    // Open existing program
                     let all_programs = self.collect_all_programs(library_manager, grid);
                     if let Some(program_entry) = all_programs.get(selected_item) {
+                        // For both square and library programs, use the editing mode
                         let script = self.program_to_source_code(&program_entry.program);
                         editing_mode = Some(EditingMode::EditProgram {
                             name: program_entry.name.clone(),
@@ -337,10 +340,12 @@ impl LibraryGui {
                 match editor.handle_input(input) {
                     ProgramEditorAction::SaveAndCompile => {
                         let program = editor.get_program();
+                        let raw_text = editor.get_program_text();
                         let action = Some(LibraryGuiAction::EditProgram {
                             source: source.clone(),
                             name: name.clone(),
                             program,
+                            raw_text,
                         });
                         if let LibraryGuiState::Visible { editing_mode, .. } = &mut self.state {
                             *editing_mode = None;
@@ -357,10 +362,12 @@ impl LibraryGui {
                         // Continue editing
                     },
                     ProgramEditorAction::SaveProgram(program) => {
+                        let raw_text = editor.get_program_text();
                         let action = Some(LibraryGuiAction::EditProgram {
                             source: source.clone(),
                             name: name.clone(),
                             program,
+                            raw_text,
                         });
                         if let LibraryGuiState::Visible { editing_mode, .. } = &mut self.state {
                             *editing_mode = None;
@@ -451,23 +458,9 @@ impl LibraryGui {
 
     fn collect_all_programs(&self, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Vec<ProgramEntry> {
         let mut all_programs = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
         
-        // Include all libraries, including "lib" for user-created programs
-        for (lib_name, lib) in &library_manager.function_libraries {
-            for (prog_name, program) in &lib.functions {
-                // Skip only the default predefined functions, not user-created ones
-                if lib_name == "lib" && self.is_predefined_function(prog_name) {
-                    continue;
-                }
-                all_programs.push(ProgramEntry {
-                    name: prog_name.clone(),
-                    program: program.clone(),
-                    source: ProgramSource::Library { library_name: lib_name.clone() },
-                });
-            }
-        }
-        
-        // Collect programs from squares, but skip the default "Default" program
+        // First, collect programs from squares (prioritize original square programs)
         for (y, row) in grid.iter().enumerate() {
             for (x, cell) in row.iter().enumerate() {
                 if cell.is_square() {
@@ -478,12 +471,38 @@ impl LibraryGui {
                                 continue;
                             }
                         }
-                        all_programs.push(ProgramEntry {
-                            name: program.name.clone(),
-                            program: program.clone(),
-                            source: ProgramSource::Square { x, y, program_index: prog_index },
-                        });
+                        
+                        // Only add if we haven't seen this program name before
+                        if seen_names.insert(program.name.clone()) {
+                            all_programs.push(ProgramEntry {
+                                name: program.name.clone(),
+                                program: program.clone(),
+                                source: ProgramSource::Square { x, y, program_index: prog_index },
+                            });
+                        }
                     }
+                }
+            }
+        }
+        
+        // Then, include library programs that don't conflict with square programs
+        for (lib_name, lib) in &library_manager.function_libraries {
+            for (prog_name, program) in &lib.functions {
+                // Skip predefined functions and auto-generated copies of square programs
+                if lib_name == "lib" && self.is_predefined_function(prog_name) {
+                    continue;
+                }
+                if lib_name == "auto" {
+                    continue; // Skip auto library entirely as these are copies of square programs
+                }
+                
+                // Only add if we haven't seen this program name before
+                if seen_names.insert(prog_name.clone()) {
+                    all_programs.push(ProgramEntry {
+                        name: prog_name.clone(),
+                        program: program.clone(),
+                        source: ProgramSource::Library { library_name: lib_name.clone() },
+                    });
                 }
             }
         }
@@ -504,6 +523,12 @@ impl LibraryGui {
     }
 
     fn program_to_source_code(&self, program: &Program) -> Vec<String> {
+        // If the program has preserved source text, use it directly
+        if let Some(ref source_text) = program.source_text {
+            return source_text.clone();
+        }
+        
+        // Otherwise, reconstruct from instructions (fallback for library functions)
         let mut lines = Vec::new();
         lines.push(format!("def {}", program.name));
         
@@ -565,8 +590,7 @@ impl LibraryGui {
                 }
             },
             _ => {
-                // Fallback for unknown instructions
-                lines.push("// Unknown instruction".to_string());
+                // Skip unknown instructions instead of adding comments
             }
         }
     }
@@ -658,6 +682,7 @@ impl LibraryGui {
     }
 
     fn draw_background(&self, frame: &mut [u8], x: usize, y: usize, window_width: usize) {
+        // Draw gradient background similar to program editor
         for dy in 0..LIBRARY_GUI_HEIGHT {
             for dx in 0..LIBRARY_GUI_WIDTH {
                 let px = x + dx;
@@ -665,69 +690,84 @@ impl LibraryGui {
                 if px < window_width && py < frame.len() / (window_width * 4) {
                     let idx = (py * window_width + px) * 4;
                     if idx + 3 < frame.len() {
-                        frame[idx] = 50;     // R
-                        frame[idx + 1] = 50; // G
-                        frame[idx + 2] = 50; // B
+                        // Create subtle gradient from top to bottom
+                        let gradient_factor = dy as f32 / LIBRARY_GUI_HEIGHT as f32;
+                        let base_color = 45.0 + gradient_factor * 10.0;
+                        
+                        frame[idx] = base_color as u8;     // R
+                        frame[idx + 1] = base_color as u8; // G
+                        frame[idx + 2] = (base_color + 5.0) as u8; // B - slightly more blue
                         frame[idx + 3] = 255; // A
                     }
                 }
             }
         }
 
-        // Draw border
+        // Draw enhanced border
         self.draw_border(frame, x, y, LIBRARY_GUI_WIDTH, LIBRARY_GUI_HEIGHT, window_width);
     }
 
     fn draw_border(&self, frame: &mut [u8], x: usize, y: usize, width: usize, height: usize, window_width: usize) {
-        let border_color = [100, 100, 100];
+        // Draw multi-layered border for depth
+        let outer_border = [120, 120, 130];
+        let inner_border = [80, 80, 90];
         
-        // Top and bottom borders
-        for dx in 0..width {
-            let px = x + dx;
-            if px < window_width {
-                // Top border
-                if y < frame.len() / (window_width * 4) {
-                    let idx = (y * window_width + px) * 4;
-                    if idx + 3 < frame.len() {
-                        frame[idx] = border_color[0];
-                        frame[idx + 1] = border_color[1];
-                        frame[idx + 2] = border_color[2];
+        // Outer border (2px thick)
+        for thickness in 0..2 {
+            // Top and bottom borders
+            for dx in 0..width {
+                let px = x + dx;
+                if px < window_width {
+                    // Top border
+                    let top_y = y + thickness;
+                    if top_y < frame.len() / (window_width * 4) {
+                        let idx = (top_y * window_width + px) * 4;
+                        if idx + 3 < frame.len() {
+                            let color = if thickness == 0 { outer_border } else { inner_border };
+                            frame[idx] = color[0];
+                            frame[idx + 1] = color[1];
+                            frame[idx + 2] = color[2];
+                        }
                     }
-                }
-                // Bottom border
-                let bottom_y = y + height - 1;
-                if bottom_y < frame.len() / (window_width * 4) {
-                    let idx = (bottom_y * window_width + px) * 4;
-                    if idx + 3 < frame.len() {
-                        frame[idx] = border_color[0];
-                        frame[idx + 1] = border_color[1];
-                        frame[idx + 2] = border_color[2];
+                    // Bottom border
+                    let bottom_y = y + height - 1 - thickness;
+                    if bottom_y < frame.len() / (window_width * 4) {
+                        let idx = (bottom_y * window_width + px) * 4;
+                        if idx + 3 < frame.len() {
+                            let color = if thickness == 0 { outer_border } else { inner_border };
+                            frame[idx] = color[0];
+                            frame[idx + 1] = color[1];
+                            frame[idx + 2] = color[2];
+                        }
                     }
                 }
             }
-        }
 
-        // Left and right borders
-        for dy in 0..height {
-            let py = y + dy;
-            if py < frame.len() / (window_width * 4) {
-                // Left border
-                if x < window_width {
-                    let idx = (py * window_width + x) * 4;
-                    if idx + 3 < frame.len() {
-                        frame[idx] = border_color[0];
-                        frame[idx + 1] = border_color[1];
-                        frame[idx + 2] = border_color[2];
+            // Left and right borders
+            for dy in 0..height {
+                let py = y + dy;
+                if py < frame.len() / (window_width * 4) {
+                    // Left border
+                    let left_x = x + thickness;
+                    if left_x < window_width {
+                        let idx = (py * window_width + left_x) * 4;
+                        if idx + 3 < frame.len() {
+                            let color = if thickness == 0 { outer_border } else { inner_border };
+                            frame[idx] = color[0];
+                            frame[idx + 1] = color[1];
+                            frame[idx + 2] = color[2];
+                        }
                     }
-                }
-                // Right border
-                let right_x = x + width - 1;
-                if right_x < window_width {
-                    let idx = (py * window_width + right_x) * 4;
-                    if idx + 3 < frame.len() {
-                        frame[idx] = border_color[0];
-                        frame[idx + 1] = border_color[1];
-                        frame[idx + 2] = border_color[2];
+                    // Right border
+                    let right_x = x + width - 1 - thickness;
+                    if right_x < window_width {
+                        let idx = (py * window_width + right_x) * 4;
+                        if idx + 3 < frame.len() {
+                            let color = if thickness == 0 { outer_border } else { inner_border };
+                            frame[idx] = color[0];
+                            frame[idx + 1] = color[1];
+                            frame[idx + 2] = color[2];
+                        }
                     }
                 }
             }
@@ -735,28 +775,54 @@ impl LibraryGui {
     }
 
     fn draw_headers(&self, frame: &mut [u8], x: usize, y: usize, selected_column: &LibraryColumn, window_width: usize) {
+        // Draw header background with subtle gradient
+        for dy in 0..HEADER_HEIGHT {
+            for dx in 0..LIBRARY_GUI_WIDTH {
+                let px = x + dx;
+                let py = y + dy;
+                if px < window_width && py < frame.len() / (window_width * 4) {
+                    let idx = (py * window_width + px) * 4;
+                    if idx + 3 < frame.len() {
+                        let gradient_factor = dy as f32 / HEADER_HEIGHT as f32;
+                        let base_color = 35.0 + gradient_factor * 15.0;
+                        
+                        frame[idx] = base_color as u8;
+                        frame[idx + 1] = base_color as u8;
+                        frame[idx + 2] = (base_color + 8.0) as u8;
+                        frame[idx + 3] = 255;
+                    }
+                }
+            }
+        }
+
+        // Draw title
+        font::draw_text(frame, "Library Manager", x + 15, y + 8, [200, 200, 255], false, window_width);
+        
         // Sample header
         let sample_selected = matches!(selected_column, LibraryColumn::Samples);
-        self.draw_text(frame, "SAMPLES", x + 10, y + 10, 
-                      if sample_selected { [255, 255, 255] } else { [150, 150, 150] }, 
+        self.draw_text(frame, "SAMPLES", x + 15, y + 25, 
+                      if sample_selected { [255, 255, 100] } else { [180, 180, 180] }, 
                       sample_selected, window_width);
 
         // Program header
         let program_selected = matches!(selected_column, LibraryColumn::Programs);
-        self.draw_text(frame, "PROGRAMS", x + COLUMN_WIDTH + 20, y + 10, 
-                      if program_selected { [255, 255, 255] } else { [150, 150, 150] }, 
+        self.draw_text(frame, "PROGRAMS", x + COLUMN_WIDTH + 25, y + 25, 
+                      if program_selected { [255, 255, 100] } else { [180, 180, 180] }, 
                       program_selected, window_width);
 
-        // Draw column separator
-        let separator_x = x + COLUMN_WIDTH + 5;
-        for dy in 0..LIBRARY_GUI_HEIGHT {
+        // Draw column separator with enhanced styling
+        let separator_x = x + COLUMN_WIDTH + 10;
+        for dy in HEADER_HEIGHT..LIBRARY_GUI_HEIGHT {
             let py = y + dy;
             if separator_x < window_width && py < frame.len() / (window_width * 4) {
                 let idx = (py * window_width + separator_x) * 4;
                 if idx + 3 < frame.len() {
-                    frame[idx] = 80;
-                    frame[idx + 1] = 80;
-                    frame[idx + 2] = 80;
+                    // Create a subtle gradient separator
+                    let gradient = (dy - HEADER_HEIGHT) as f32 / (LIBRARY_GUI_HEIGHT - HEADER_HEIGHT) as f32;
+                    let color_val = (100.0 + gradient * 20.0) as u8;
+                    frame[idx] = color_val;
+                    frame[idx + 1] = color_val;
+                    frame[idx + 2] = color_val + 10;
                 }
             }
         }
@@ -766,15 +832,38 @@ impl LibraryGui {
                          selected_library: &str, selected_column: &LibraryColumn, 
                          selected_item: usize, scroll_offset: usize, window_width: usize) {
         if let Some(library) = library_manager.sample_libraries.get(selected_library) {
-            let start_y = y + HEADER_HEIGHT;
+            let start_y = y + HEADER_HEIGHT + 5;
             let is_column_selected = matches!(selected_column, LibraryColumn::Samples);
             
             for (i, (name, _sample)) in library.samples.iter().enumerate().skip(scroll_offset).take(MAX_VISIBLE_ITEMS) {
                 let item_y = start_y + i * ITEM_HEIGHT;
                 let is_selected = is_column_selected && (i + scroll_offset) == selected_item;
                 
-                self.draw_text(frame, name, x + 10, item_y, 
-                              if is_selected { [255, 255, 0] } else { [200, 200, 200] }, 
+                // Draw selection background
+                if is_selected {
+                    for dx in 0..(COLUMN_WIDTH - 10) {
+                        for dy in 0..(ITEM_HEIGHT - 2) {
+                            let px = x + 8 + dx;
+                            let py = item_y - 2 + dy;
+                            if px < window_width && py < frame.len() / (window_width * 4) {
+                                let idx = (py * window_width + px) * 4;
+                                if idx + 3 < frame.len() {
+                                    frame[idx] = frame[idx].saturating_add(25);
+                                    frame[idx + 1] = frame[idx + 1].saturating_add(25);
+                                    frame[idx + 2] = frame[idx + 2].saturating_add(35);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Draw sample icon
+                font::draw_text(frame, "♪", x + 15, item_y, 
+                              if is_selected { [100, 200, 255] } else { [120, 120, 150] }, 
+                              false, window_width);
+                
+                self.draw_text(frame, name, x + 30, item_y, 
+                              if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
                               is_selected, window_width);
             }
         }
@@ -784,7 +873,7 @@ impl LibraryGui {
                           grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT],
                           selected_library: &str, selected_column: &LibraryColumn, 
                           selected_item: usize, scroll_offset: usize, window_width: usize) {
-        let start_y = y + HEADER_HEIGHT;
+        let start_y = y + HEADER_HEIGHT + 5;
         let is_column_selected = matches!(selected_column, LibraryColumn::Programs);
         
         let all_programs = self.collect_all_programs(library_manager, grid);
@@ -792,10 +881,35 @@ impl LibraryGui {
             let item_y = start_y + i * ITEM_HEIGHT;
             let is_selected = is_column_selected && (i + scroll_offset) == selected_item;
             
-            let display_text = entry.name.clone();
+            // Draw selection background
+            if is_selected {
+                for dx in 0..(COLUMN_WIDTH - 20) {
+                    for dy in 0..(ITEM_HEIGHT - 2) {
+                        let px = x + 8 + dx;
+                        let py = item_y - 2 + dy;
+                        if px < window_width && py < frame.len() / (window_width * 4) {
+                            let idx = (py * window_width + px) * 4;
+                            if idx + 3 < frame.len() {
+                                frame[idx] = frame[idx].saturating_add(25);
+                                frame[idx + 1] = frame[idx + 1].saturating_add(25);
+                                frame[idx + 2] = frame[idx + 2].saturating_add(35);
+                            }
+                        }
+                    }
+                }
+            }
             
-            self.draw_text(frame, &display_text, x + 10, item_y, 
-                          if is_selected { [255, 255, 0] } else { [200, 200, 200] }, 
+            // Draw program type icon
+            let (icon, icon_color) = match &entry.source {
+                ProgramSource::Library { .. } => ("📚", if is_selected { [100, 255, 100] } else { [100, 150, 100] }),
+                ProgramSource::Square { .. } => ("⚡", if is_selected { [255, 200, 100] } else { [150, 120, 80] }),
+            };
+            
+            font::draw_text(frame, icon, x + 15, item_y, icon_color, false, window_width);
+            
+            let display_text = entry.name.clone();
+            self.draw_text(frame, &display_text, x + 30, item_y, 
+                          if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
                           is_selected, window_width);
         }
     }
@@ -803,12 +917,12 @@ impl LibraryGui {
     fn draw_editing_overlay(&self, frame: &mut [u8], x: usize, y: usize, edit_mode: &EditingMode, window_width: usize) {
         match edit_mode {
             EditingMode::RenameItem { original_name: _, new_name } => {
-                let overlay_width = 300;
-                let overlay_height = 200;
+                let overlay_width = 350;
+                let overlay_height = 150;
                 let overlay_x = x + (LIBRARY_GUI_WIDTH - overlay_width) / 2;
                 let overlay_y = y + (LIBRARY_GUI_HEIGHT - overlay_height) / 2;
 
-                // Draw overlay background
+                // Draw overlay background with gradient
                 for dy in 0..overlay_height {
                     for dx in 0..overlay_width {
                         let px = overlay_x + dx;
@@ -816,19 +930,43 @@ impl LibraryGui {
                         if px < window_width && py < frame.len() / (window_width * 4) {
                             let idx = (py * window_width + px) * 4;
                             if idx + 3 < frame.len() {
-                                frame[idx] = 70;     // R
-                                frame[idx + 1] = 70; // G
-                                frame[idx + 2] = 70; // B
-                                frame[idx + 3] = 255; // A
+                                let gradient_factor = dy as f32 / overlay_height as f32;
+                                let base_color = 60.0 + gradient_factor * 15.0;
+                                
+                                frame[idx] = base_color as u8;
+                                frame[idx + 1] = base_color as u8;
+                                frame[idx + 2] = (base_color + 10.0) as u8;
+                                frame[idx + 3] = 255;
                             }
                         }
                     }
                 }
 
                 self.draw_border(frame, overlay_x, overlay_y, overlay_width, overlay_height, window_width);
-                self.draw_text(frame, "Rename Item:", overlay_x + 10, overlay_y + 10, [255, 255, 255], false, window_width);
-                self.draw_text(frame, new_name, overlay_x + 10, overlay_y + 40, [255, 255, 0], true, window_width);
-                self.draw_text(frame, "Press Enter to confirm, Esc to cancel", overlay_x + 10, overlay_y + 70, [150, 150, 150], false, window_width);
+                
+                // Draw title with icon
+                font::draw_text(frame, "✏️", overlay_x + 15, overlay_y + 15, [255, 200, 100], false, window_width);
+                self.draw_text(frame, "Rename Item", overlay_x + 35, overlay_y + 15, [200, 200, 255], false, window_width);
+                
+                // Draw input field background
+                for dx in 0..(overlay_width - 40) {
+                    for dy in 0..25 {
+                        let px = overlay_x + 20 + dx;
+                        let py = overlay_y + 45 + dy;
+                        if px < window_width && py < frame.len() / (window_width * 4) {
+                            let idx = (py * window_width + px) * 4;
+                            if idx + 3 < frame.len() {
+                                frame[idx] = 40;
+                                frame[idx + 1] = 40;
+                                frame[idx + 2] = 50;
+                                frame[idx + 3] = 255;
+                            }
+                        }
+                    }
+                }
+                
+                self.draw_text(frame, new_name, overlay_x + 25, overlay_y + 50, [255, 255, 100], true, window_width);
+                self.draw_text(frame, "Enter: Confirm  •  Esc: Cancel", overlay_x + 20, overlay_y + 85, [180, 180, 180], false, window_width);
             },
             EditingMode::CreateProgram { name, editor } => {
                 editor.draw_program_editor(frame, "Create Program", "Arrow keys: Navigate | Backspace/Delete: Edit | ESC: Save & Exit");

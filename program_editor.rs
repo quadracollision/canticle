@@ -67,6 +67,18 @@ impl ProgramEditor {
         }
     }
 
+    pub fn new_truly_empty() -> Self {
+        Self {
+            program_text: vec!["".to_string()],
+            cursor_line: 0,
+            cursor_col: 0,
+            parser: SimpleProgramParser::new(),
+            last_key_repeat: None,
+            key_repeat_delay: Duration::from_millis(500),
+            key_repeat_rate: Duration::from_millis(100),
+        }
+    }
+
     pub fn get_program(&self) -> Program {
         let program_source = self.program_text.join("\n");
         match self.parser.parse_program(&program_source) {

@@ -1588,12 +1588,16 @@ impl SequencerUI {
                                 self.grid.log_to_console(format!("Created library '{}' and program '{}'", library_name, name));
                             }
                         }
-                        LibraryGuiAction::EditProgram { source, name, program } => {
+                        LibraryGuiAction::EditProgram { source, name, program, raw_text } => {
+                            // Create a program with the raw text preserved
+                            let mut updated_program = program;
+                            updated_program.source_text = Some(raw_text);
+                            
                             match source {
                                 crate::library_gui::ProgramSource::Library { library_name } => {
                                     // Update program in library
                                     if let Some(lib) = self.grid.library_manager.function_libraries.get_mut(&library_name) {
-                                        lib.functions.insert(name.clone(), program);
+                                        lib.functions.insert(name.clone(), updated_program);
                                         self.grid.log_to_console(format!("Updated program '{}' in library '{}'", name, library_name));
                                     }
                                 },
@@ -1601,11 +1605,56 @@ impl SequencerUI {
                                     // Update program in square
                                     if x < crate::sequencer::GRID_WIDTH && y < crate::sequencer::GRID_HEIGHT {
                                         if let Some(square_program) = self.grid.cells[y][x].program.programs.get_mut(program_index) {
-                                            *square_program = program;
+                                            *square_program = updated_program;
                                             self.grid.log_to_console(format!("Updated program '{}' in square ({}, {})", name, x, y));
                                         }
                                     }
                                 },
+                            }
+                        }
+                        LibraryGuiAction::OpenSquareScript { x, y, program_index } => {
+                            // Open the square menu in program editor mode for the specific square
+                            if x < crate::sequencer::GRID_WIDTH && y < crate::sequencer::GRID_HEIGHT {
+                                let cell = &self.grid.cells[y][x];
+                                
+                                // Get the program at the specified index
+                                if let Some(program) = cell.program.get_program(program_index) {
+                                    // Check if this is the default program (name "Default" with only bounce instruction)
+                                    let is_default_program = program.name == "Default" && 
+                                        program.instructions.len() == 1 &&
+                                        matches!(program.instructions[0], crate::square::Instruction::Bounce);
+                                    
+                                    if is_default_program {
+                                        // Default program, start with empty editor
+                                        self.grid.square_menu.program_editor = crate::program_editor::ProgramEditor::new_empty();
+                                        self.grid.square_menu.editing_program_index = Some(program_index);
+                                    } else {
+                                        // Use preserved source text if available, otherwise start with empty editor
+                                        if let Some(ref source_text) = program.source_text {
+                                            self.grid.square_menu.program_editor = crate::program_editor::ProgramEditor::new_with_text(source_text.clone());
+                                            self.grid.square_menu.editing_program_index = Some(program_index);
+                                        } else {
+                                            // No source text available, start with truly empty editor to avoid corrupting the script
+                                            self.grid.square_menu.program_editor = crate::program_editor::ProgramEditor::new_truly_empty();
+                                            self.grid.square_menu.editing_program_index = Some(program_index);
+                                        }
+                                    }
+                                } else {
+                                    // No existing program, start with truly empty editor
+                                    self.grid.square_menu.program_editor = crate::program_editor::ProgramEditor::new_truly_empty();
+                                    self.grid.square_menu.editing_program_index = None;
+                                }
+                                
+                                // Set the square menu state to program editor mode
+                                self.grid.square_menu.state = crate::square_menu::SquareMenuState::ProgramEditor {
+                                    square_x: x,
+                                    square_y: y,
+                                    cursor_line: 0,
+                                    cursor_col: 0,
+                                };
+                                
+                                self.grid.library_gui.toggle(); // Close the library GUI
+                                self.grid.log_to_console(format!("Opened script editor for square ({}, {}) program {}", x, y, program_index));
                             }
                         }
                         LibraryGuiAction::LoadSample { library_name } => {

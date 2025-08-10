@@ -89,8 +89,7 @@ impl SquareContextMenu {
                 }
             },
             _ => {
-                // Fallback for unknown instructions
-                lines.push("// Unknown instruction".to_string());
+                // Skip unknown instructions instead of adding comments
             }
         }
     }
