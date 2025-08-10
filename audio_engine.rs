@@ -69,7 +69,31 @@ impl AudioChannel {
             return Ok(());
         }
         
-        let file = File::open(file_path)?;
+        // Try to resolve the file path - check if it's absolute or relative
+        let resolved_path = if std::path::Path::new(file_path).is_absolute() {
+            file_path.to_string()
+        } else {
+            // For relative paths, try multiple locations
+            let current_dir = std::env::current_dir().unwrap_or_default();
+            let libraries_path = current_dir.join("libraries").join(file_path);
+            let direct_path = current_dir.join(file_path);
+            
+            if libraries_path.exists() {
+                libraries_path.to_string_lossy().to_string()
+            } else if direct_path.exists() {
+                direct_path.to_string_lossy().to_string()
+            } else {
+                // If file doesn't exist in expected locations, try the original path anyway
+                file_path.to_string()
+            }
+        };
+        
+        log::info!("Attempting to play audio file: {}", resolved_path);
+        
+        let file = File::open(&resolved_path).map_err(|e| {
+            log::error!("Failed to open audio file '{}': {}", resolved_path, e);
+            e
+        })?;
         let source = Decoder::new(BufReader::new(file))?;
         let amplified_source = source.amplify(self.volume);
         
@@ -77,6 +101,7 @@ impl AudioChannel {
         for sink in &self.sink_pool {
             if sink.empty() {
                 sink.append(amplified_source);
+                log::info!("Audio playing on pool sink: {}", resolved_path);
                 return Ok(());
             }
         }
@@ -84,6 +109,7 @@ impl AudioChannel {
         // If no sink is available, use the main sink (this will interrupt current playback)
         self.sink.stop();
         self.sink.append(amplified_source);
+        log::info!("Audio playing on main sink: {}", resolved_path);
         Ok(())
     }
     
@@ -299,18 +325,43 @@ impl AudioEngine {
     
     // Cache management for better performance
     pub fn preload_sample(&self, file_path: &str) -> Result<()> {
-        let path_key = file_path.to_string();
+        // Use the same path resolution logic as play_file
+        let resolved_path = if std::path::Path::new(file_path).is_absolute() {
+            file_path.to_string()
+        } else {
+            // For relative paths, try multiple locations
+            let current_dir = std::env::current_dir().unwrap_or_default();
+            let libraries_path = current_dir.join("libraries").join(file_path);
+            let direct_path = current_dir.join(file_path);
+            
+            if libraries_path.exists() {
+                libraries_path.to_string_lossy().to_string()
+            } else if direct_path.exists() {
+                direct_path.to_string_lossy().to_string()
+            } else {
+                // If file doesn't exist in expected locations, try the original path anyway
+                file_path.to_string()
+            }
+        };
+        
+        let path_key = resolved_path.clone();
         
         // Check if already cached
         {
             let cache = self.sample_cache.lock().unwrap();
             if cache.contains_key(&path_key) {
+                log::info!("Sample already cached: {}", resolved_path);
                 return Ok(());
             }
         }
         
+        log::info!("Attempting to preload sample: {}", resolved_path);
+        
         // Load and cache the sample
-        let file = File::open(file_path)?;
+        let file = File::open(&resolved_path).map_err(|e| {
+            log::error!("Failed to preload sample '{}': {}", resolved_path, e);
+            e
+        })?;
         let mut reader = BufReader::new(file);
         let mut data = Vec::new();
         reader.read_to_end(&mut data)?;
@@ -324,7 +375,7 @@ impl AudioEngine {
         let mut cache = self.sample_cache.lock().unwrap();
         cache.insert(path_key, cached_sample);
         
-        log::info!("Preloaded sample: {}", file_path);
+        log::info!("Successfully preloaded sample: {}", resolved_path);
         Ok(())
     }
     

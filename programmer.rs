@@ -179,6 +179,19 @@ impl SimpleProgramParser {
                 continue;
             }
             
+            // Handle create ball/square with library reference on next line
+            if (line.starts_with("create ball(") || line.starts_with("create square(")) && i + 1 < lines.len() {
+                let next_line = lines[i + 1].trim();
+                if next_line.starts_with("with lib.") {
+                    let combined_line = format!("{} {}", line, next_line);
+                    if let Ok(instruction) = self.parse_line(&combined_line) {
+                        instructions.push(instruction);
+                        i += 2; // Skip both lines
+                        continue;
+                    }
+                }
+            }
+            
             if let Ok(instruction) = self.parse_line(line) {
                 instructions.push(instruction);
             } else {
@@ -354,6 +367,11 @@ impl SimpleProgramParser {
     fn parse_line(&self, line: &str) -> Result<Instruction, String> {
         let line = line.trim();
         
+        // Handle "var" statements
+        if line.starts_with("var ") {
+            return self.parse_var_statement(line);
+        }
+        
         // Handle "set" statements
         if line.starts_with("set ") {
             return self.parse_set_statement(line);
@@ -393,6 +411,30 @@ impl SimpleProgramParser {
             op: BinaryOperator::Equal,
             right: Box::new(Expression::Literal(Value::Number(count as f32))),
         })
+    }
+    
+    fn parse_var_statement(&self, line: &str) -> Result<Instruction, String> {
+        // Parse "var variable_name = expression"
+        let content = &line[4..].trim(); // Remove "var "
+        
+        if let Some(eq_pos) = content.find('=') {
+            let var_name = content[..eq_pos].trim().to_string();
+            let expr_str = content[eq_pos + 1..].trim();
+            
+            if var_name.is_empty() {
+                return Err("Variable name cannot be empty".to_string());
+            }
+            
+            // Parse the expression using the same logic as coordinate expressions
+            let value_expr = self.parse_coordinate_expression(expr_str)?;
+            
+            Ok(Instruction::SetVariable {
+                name: var_name,
+                value: value_expr,
+            })
+        } else {
+            Err("Invalid var statement format. Expected: var variable_name = expression".to_string())
+        }
     }
     
     fn parse_set_statement(&self, line: &str) -> Result<Instruction, String> {
@@ -556,9 +598,12 @@ impl SimpleProgramParser {
                                 } else if remaining.trim().starts_with("with") {
                                     // Check if it's a library reference like "with lib.ballcreator and lib.kick4.wav"
                                     if remaining.contains("lib.") {
-                                        // For library references, we need to evaluate expressions to get literal values
-                                        // This is a limitation - library references currently expect literal coordinates
-                                        return Err("Library references with dynamic coordinates not yet supported".to_string());
+                                        // Check if coordinates are literal numbers for library references
+                                        if let (Expression::Literal(Value::Number(x)), Expression::Literal(Value::Number(y))) = (&x_expr, &y_expr) {
+                                            return self.parse_create_with_library_reference("ball", *x, *y, remaining.trim());
+                                        } else {
+                                            return Err("Library references require literal coordinate values".to_string());
+                                        }
                                     }
                                     return Err("Invalid 'with' syntax for ball creation".to_string());
                                 } else {
@@ -577,9 +622,12 @@ impl SimpleProgramParser {
                                 if remaining.starts_with("with") {
                                     // Check if it's a library reference like "with lib.ballcreator and lib.kick4.wav"
                                     if remaining.contains("lib.") {
-                                        // For library references, we need to evaluate expressions to get literal values
-                                        // This is a limitation - library references currently expect literal coordinates
-                                        return Err("Library references with dynamic coordinates not yet supported".to_string());
+                                        // Check if coordinates are literal numbers for library references
+                                        if let (Expression::Literal(Value::Number(x)), Expression::Literal(Value::Number(y))) = (&x_expr, &y_expr) {
+                                            return self.parse_create_with_library_reference("square", *x, *y, remaining);
+                                        } else {
+                                            return Err("Library references require literal coordinate values".to_string());
+                                        }
                                     } else {
                                         // This indicates we have an embedded program, but we need to handle this
                                         // at a higher level since we need access to multiple lines
@@ -810,6 +858,15 @@ impl ProgramExecutor {
         self.state.ball_hit_counts.clear();
         self.state.square_hit_counts.clear();
         self.state.ball_color_square_hits.clear();
+    }
+    
+    pub fn reset_variables(&mut self) {
+        self.state.variables.clear();
+    }
+    
+    pub fn reset_all_state(&mut self) {
+        self.reset_all_hit_counts();
+        self.reset_variables();
     }
     
     pub fn execute_on_collision(

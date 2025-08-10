@@ -7,7 +7,6 @@ pub enum ContextMenuState {
     BallDirection { ball_index: usize, selected_option: usize },
     BallSpeed { ball_index: usize, speed: f32 }, // speed in grid units per second
     BallRelativeSpeed { ball_index: usize, selected_ball: usize, speed_ratio: f32 },
-    BallSample { ball_index: usize, selected_option: usize },
     BallColor { ball_index: usize, selected_option: usize },
 }
 
@@ -20,7 +19,7 @@ const DIRECTION_OPTIONS: &[&str] = &["Up", "Down", "Left", "Right", "Up-Left", "
 const MIN_SPEED: f32 = 0.5;
 const MAX_SPEED: f32 = 10.0;
 const SPEED_STEP: f32 = 0.1;
-const SAMPLE_OPTIONS: &[&str] = &["Kick", "Snare", "Hi-hat", "Load File..."];
+
 const COLOR_OPTIONS: &[&str] = &["Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Orange"];
 const RELATIVE_SPEED_RATIOS: &[f32] = &[1.0/16.0, 1.0/8.0, 1.0/4.0, 1.0/2.0, 1.0, 2.0, 4.0, 8.0, 16.0];
 const RELATIVE_SPEED_LABELS: &[&str] = &["1/16x", "1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", "16x"];
@@ -66,6 +65,12 @@ impl ContextMenu {
                     return None;
                 }
                 if input.key_pressed(VirtualKeyCode::Space) {
+                    // Check for Shift+Space on Sample option to add to library
+                    if selected_option == 3 && (input.held_shift()) {
+                        self.close();
+                        return Some(ContextMenuAction::AddSampleToLibrary { ball_index });
+                    }
+                    
                     match selected_option {
                         0 => self.state = ContextMenuState::BallDirection { ball_index, selected_option: 0 },
                         1 => {
@@ -78,7 +83,11 @@ impl ContextMenu {
                             let selected_ball = if ball_index == 0 && balls.len() > 1 { 1 } else { 0 };
                             self.state = ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio: 1.0 };
                         },
-                        3 => self.state = ContextMenuState::BallSample { ball_index, selected_option: 0 },
+                        3 => {
+                            // Sample - directly open file dialog
+                            self.close();
+                            return Some(ContextMenuAction::OpenFileDialog { ball_index });
+                        },
                         4 => self.state = ContextMenuState::BallColor { ball_index, selected_option: 0 },
                         _ => {}
                     }
@@ -179,52 +188,7 @@ impl ContextMenu {
                 }
                 None
             }
-            ContextMenuState::BallSample { ball_index, selected_option } => {
-                if input.key_pressed(VirtualKeyCode::Escape) {
-                    self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                    return None;
-                }
-                if input.key_pressed(VirtualKeyCode::Up) {
-                    let new_option = if selected_option == 0 { SAMPLE_OPTIONS.len() - 1 } else { selected_option - 1 };
-                    self.state = ContextMenuState::BallSample { ball_index, selected_option: new_option };
-                    return None;
-                }
-                if input.key_pressed(VirtualKeyCode::Down) {
-                    let new_option = (selected_option + 1) % SAMPLE_OPTIONS.len();
-                    self.state = ContextMenuState::BallSample { ball_index, selected_option: new_option };
-                    return None;
-                }
-                if input.key_pressed(VirtualKeyCode::Space) {
-                    match selected_option {
-                        0 => {
-                            let sample = "kick.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                            return Some(ContextMenuAction::SetSample { ball_index, sample });
-                        }
-                        1 => {
-                            let sample = "snare.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                            return Some(ContextMenuAction::SetSample { ball_index, sample });
-                        }
-                        2 => {
-                            let sample = "hihat.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                            return Some(ContextMenuAction::SetSample { ball_index, sample });
-                        }
-                        3 => {
-                            // Load File... option
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                            return Some(ContextMenuAction::OpenFileDialog { ball_index });
-                        }
-                        _ => {
-                            let sample = "kick.wav".to_string();
-                            self.state = ContextMenuState::BallMenu { ball_index, selected_option: 3 };
-                            return Some(ContextMenuAction::SetSample { ball_index, sample });
-                        }
-                    }
-                }
-                None
-            }
+
             ContextMenuState::BallColor { ball_index, selected_option } => {
                 if input.key_pressed(VirtualKeyCode::Escape) {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 4 };
@@ -256,7 +220,7 @@ impl ContextMenu {
             ContextMenuState::BallMenu { ball_index, selected_option } => {
                 if let Some(ball) = balls.get(ball_index) {
                     let (ball_x, ball_y) = ball.get_grid_position();
-                    draw_ball_menu(frame, ball_x, ball_y, selected_option);
+                    draw_ball_menu(frame, ball_x, ball_y, selected_option, ball);
                 }
             }
             ContextMenuState::BallDirection { ball_index, selected_option } => {
@@ -277,12 +241,7 @@ impl ContextMenu {
                     draw_relative_speed_menu(frame, ball_x, ball_y, selected_ball, speed_ratio, balls);
                 }
             }
-            ContextMenuState::BallSample { ball_index, selected_option } => {
-                if let Some(ball) = balls.get(ball_index) {
-                    let (ball_x, ball_y) = ball.get_grid_position();
-                    draw_sample_menu(frame, ball_x, ball_y, selected_option);
-                }
-            }
+
             ContextMenuState::BallColor { ball_index, selected_option } => {
                 if let Some(ball) = balls.get(ball_index) {
                     let (ball_x, ball_y) = ball.get_grid_position();
@@ -301,10 +260,12 @@ pub enum ContextMenuAction {
     SetSample { ball_index: usize, sample: String },
     SetColor { ball_index: usize, color: String },
     OpenFileDialog { ball_index: usize },
+    AddSampleToLibrary { ball_index: usize },
 }
 
 // Import types from modules
 use crate::ball::{Ball, Direction};
+use crate::font;
 
 // Constants for drawing
 const CELL_SIZE: usize = 40;
@@ -346,494 +307,13 @@ fn draw_menu_border(frame: &mut [u8], x: usize, y: usize, width: usize, height: 
 }
 
 fn draw_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
-    let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
-    
-    // Draw background if selected
-    if selected {
-        let text_width = text.len() * 8;
-        let text_height = 12;
-        for py in y..y + text_height {
-            for px in x..x + text_width {
-                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                    let index = (py * WINDOW_WIDTH + px) * 4;
-                    if index + 3 < frame.len() {
-                        frame[index] = bg_color[0];
-                        frame[index + 1] = bg_color[1];
-                        frame[index + 2] = bg_color[2];
-                    }
-                }
-            }
-        }
-    }
-    
-    // Draw text characters
-    for (i, ch) in text.chars().enumerate() {
-        draw_simple_char(frame, ch, x + i * 8, y, color);
-    }
+    font::draw_text(frame, text, x, y, color, selected, WINDOW_WIDTH);
 }
 
-fn draw_simple_char(frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3]) {
-    // 8x12 bitmap font patterns (same as square_menu for consistency)
-    let pattern = match ch {
-        'A' | 'a' => [
-            0b01110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11111000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'B' | 'b' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'C' | 'c' => [
-            0b01110000,
-            0b10001000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'D' | 'd' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'E' | 'e' => [
-            0b11111000,
-            0b10000000,
-            0b10000000,
-            0b11110000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'F' | 'f' => [
-            0b11111000,
-            0b10000000,
-            0b10000000,
-            0b11110000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'G' | 'g' => [
-            0b01110000,
-            0b10001000,
-            0b10000000,
-            0b10000000,
-            0b10111000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'H' | 'h' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11111000,
-            0b11111000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'I' | 'i' => [
-            0b01110000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'L' | 'l' => [
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'M' | 'm' => [
-            0b10001000,
-            0b11011000,
-            0b10101000,
-            0b10101000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'N' | 'n' => [
-            0b10001000,
-            0b11001000,
-            0b10101000,
-            0b10101000,
-            0b10011000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'O' | 'o' => [
-            0b01110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'P' | 'p' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'R' | 'r' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b10100000,
-            0b10010000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'S' | 's' => [
-            0b01111000,
-            0b10000000,
-            0b10000000,
-            0b01110000,
-            0b00001000,
-            0b00001000,
-            0b00001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'T' | 't' => [
-            0b11111000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'U' | 'u' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'V' | 'v' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01010000,
-            0b01010000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'W' | 'w' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10101000,
-            0b10101000,
-            0b11011000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '0' => [
-            0b01110000,
-            0b10001000,
-            0b10011000,
-            0b10101000,
-            0b11001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '1' => [
-            0b00100000,
-            0b01100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '2' => [
-            0b01110000,
-            0b10001000,
-            0b00001000,
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '3' => [
-            0b01110000,
-            0b10001000,
-            0b00001000,
-            0b00110000,
-            0b00001000,
-            0b00001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ' ' => [0; 12],
-        ':' => [
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '(' => [
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b01000000,
-            0b01000000,
-            0b01000000,
-            0b00100000,
-            0b00010000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ')' => [
-            0b01000000,
-            0b00100000,
-            0b00010000,
-            0b00010000,
-            0b00010000,
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ',' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00100000,
-            0b01000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '-' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '+' => [
-            0b00000000,
-            0b00000000,
-            0b00100000,
-            0b00100000,
-            0b11111000,
-            0b00100000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '.' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        _ => [0; 12], // Default to empty for unknown characters
-    };
-    
-    for (row, &byte) in pattern.iter().enumerate() {
-        for col in 0..8 {
-            if byte & (0x80 >> col) != 0 {
-                let px = x + col;
-                let py = y + row;
-                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                    let index = (py * WINDOW_WIDTH + px) * 4;
-                    if index + 3 < frame.len() {
-                        frame[index] = color[0];     // R
-                        frame[index + 1] = color[1]; // G
-                        frame[index + 2] = color[2]; // B
-                        frame[index + 3] = 255;      // A
-                    }
-                }
-            }
-        }
-    }
-}
 
-fn draw_ball_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_option: usize) {
-    let menu_width = CELL_SIZE * 4;
+
+fn draw_ball_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_option: usize, ball: &Ball) {
+    let menu_width = CELL_SIZE * 6; // Increased width to accommodate sample names
     let menu_height = CELL_SIZE * 3;
     
     // Position menu to the right of the ball, but keep it on screen
@@ -856,7 +336,23 @@ fn draw_ball_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_optio
         let text_x = menu_x + 5;
         let text_y = menu_y + 5 + i * 20;
         let is_selected = i == selected_option;
-        draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
+        
+        // Special handling for Sample option to show current sample
+        if i == 3 && option == &"Sample" { // Sample is at index 3
+            let display_text = if let Some(ref sample_path) = ball.sample_path {
+                // Extract filename from path
+                let filename = std::path::Path::new(sample_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                format!("Sample ({})", filename)
+            } else {
+                "Sample".to_string()
+            };
+            draw_text(frame, &display_text, text_x, text_y, [200, 200, 200], is_selected);
+        } else {
+            draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
+        }
     }
 }
 
@@ -964,33 +460,7 @@ fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32)
     draw_text(frame, "<- -> to adjust, Space to confirm", menu_x + 10, menu_y + 65, [180, 180, 180], false);
 }
 
-fn draw_sample_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_option: usize) {
-    let menu_width = CELL_SIZE * 4;
-    let menu_height = CELL_SIZE * 3;
-    
-    // Position menu to the right of the ball, but keep it on screen
-    let mut menu_x = ball_x * CELL_SIZE + CELL_SIZE;
-    let mut menu_y = ball_y * CELL_SIZE;
-    
-    // Adjust if menu would go off screen
-    if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
-    }
-    if menu_y + menu_height > WINDOW_HEIGHT {
-        menu_y = WINDOW_HEIGHT - menu_height;
-    }
-    
-    draw_menu_background(frame, menu_x, menu_y, menu_width, menu_height);
-    draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
-    
-    // Draw sample options
-    for (i, option) in SAMPLE_OPTIONS.iter().enumerate() {
-        let text_x = menu_x + 5;
-        let text_y = menu_y + 5 + i * 20;
-        let is_selected = i == selected_option;
-        draw_text(frame, option, text_x, text_y, [200, 200, 200], is_selected);
-    }
-}
+
 
 fn draw_color_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_option: usize) {
     let menu_width = CELL_SIZE * 4;

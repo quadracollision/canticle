@@ -2,13 +2,13 @@ use winit::event::VirtualKeyCode;
 use crate::square::{Cell, Program};
 use crate::program_editor::{ProgramEditor, ProgramEditorAction};
 use std::time::{Duration, Instant};
+use crate::font;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SquareMenuState {
     None,
     SquareMenu { square_x: usize, square_y: usize, selected_option: usize },
     ProgramEditor { square_x: usize, square_y: usize, cursor_line: usize, cursor_col: usize },
-    ProgramList { square_x: usize, square_y: usize, selected_program: usize },
 }
 
 pub struct SquareContextMenu {
@@ -21,7 +21,7 @@ pub struct SquareContextMenu {
     key_repeat_rate: Duration,
 }
 
-const SQUARE_MENU_OPTIONS: &[&str] = &["Edit Program", "View Programs", "Test Program", "Clear Programs"];
+const SQUARE_MENU_OPTIONS: &[&str] = &["Edit Program", "Clear Programs"];
 
 impl SquareContextMenu {
     pub fn new() -> Self {
@@ -197,14 +197,6 @@ impl SquareContextMenu {
                             self.state = SquareMenuState::ProgramEditor { square_x, square_y, cursor_line: 0, cursor_col: 0 };
                         },
                         1 => {
-                            // View Programs
-                            self.state = SquareMenuState::ProgramList { square_x, square_y, selected_program: 0 };
-                        },
-                        2 => {
-                            // Test Program
-                            return Some(SquareMenuAction::TestProgram { square_x, square_y });
-                        },
-                        3 => {
                             // Clear Programs
                             return Some(SquareMenuAction::ClearPrograms { square_x, square_y });
                         },
@@ -241,14 +233,7 @@ impl SquareContextMenu {
                 }
                 None
             }
-            SquareMenuState::ProgramList { square_x, square_y, selected_program: _ } => {
-                if input.key_pressed(VirtualKeyCode::Escape) {
-                    self.state = SquareMenuState::SquareMenu { square_x, square_y, selected_option: 0 };
-                    return None;
-                }
-                // Handle program list navigation here
-                None
-            }
+
             SquareMenuState::None => None,
         }
     }
@@ -296,9 +281,7 @@ impl SquareContextMenu {
             SquareMenuState::ProgramEditor { square_x, square_y, cursor_line: _, cursor_col: _ } => {
                 self.program_editor.draw_program_editor(frame, &format!("Programming Square ({}, {})", square_x, square_y), "Arrow keys: Navigate | Backspace/Delete: Edit | ESC: Save & Exit");
             }
-            SquareMenuState::ProgramList { square_x, square_y, selected_program } => {
-                self.draw_program_list(frame, square_x, square_y, selected_program, cells);
-            }
+
             SquareMenuState::None => {}
         }
     }
@@ -314,54 +297,25 @@ impl SquareContextMenu {
         draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
 
         // Draw title
-        draw_text(frame, "Square Programming", menu_x + 10, menu_y + 5, [255, 255, 255], false);
+        font::draw_text(frame, "Square Programming", menu_x + 10, menu_y + 5, [255, 255, 255], false, 640);
 
         // Draw menu options
         for (i, option) in SQUARE_MENU_OPTIONS.iter().enumerate() {
             let y_pos = menu_y + 25 + i * 20;
             let selected = i == selected_option;
-            draw_text(frame, option, menu_x + 10, y_pos, [255, 255, 255], selected);
+            font::draw_text(frame, option, menu_x + 10, y_pos, [255, 255, 255], selected, 640);
         }
     }
 
 
 
-    fn draw_program_list(&self, frame: &mut [u8], square_x: usize, square_y: usize, selected_program: usize, cells: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) {
-        let menu_x = 100;
-        let menu_y = 100;
-        let menu_width = 400;
-        let menu_height = 200;
 
-        // Draw list background
-        draw_menu_background(frame, menu_x, menu_y, menu_width, menu_height);
-        draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
-
-        // Draw title
-        draw_text(frame, &format!("Programs for Square ({}, {})", square_x, square_y), menu_x + 10, menu_y + 5, [255, 255, 255], false);
-
-        // Get the square's programs
-        if square_x < crate::sequencer::GRID_WIDTH && square_y < crate::sequencer::GRID_HEIGHT {
-            let cell = &cells[square_y][square_x];
-            let programs = &cell.program.programs;
-
-            if programs.is_empty() {
-                draw_text(frame, "No programs defined", menu_x + 10, menu_y + 30, [200, 200, 200], false);
-            } else {
-                for (i, program) in programs.iter().enumerate() {
-                    let y_pos = menu_y + 30 + i * 20;
-                    let selected = i == selected_program;
-                    draw_text(frame, &program.name, menu_x + 10, y_pos, [255, 255, 255], selected);
-                }
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum SquareMenuAction {
     SaveProgram { square_x: usize, square_y: usize, program: Program, program_index: Option<usize> },
     SaveMultiplePrograms { square_x: usize, square_y: usize, programs: Vec<Program>, program_index: Option<usize> },
-    TestProgram { square_x: usize, square_y: usize },
     ClearPrograms { square_x: usize, square_y: usize },
 }
 
@@ -435,496 +389,6 @@ fn draw_menu_border(frame: &mut [u8], x: usize, y: usize, width: usize, height: 
                     frame[index] = border_color[0];
                     frame[index + 1] = border_color[1];
                     frame[index + 2] = border_color[2];
-                }
-            }
-        }
-    }
-}
-
-fn draw_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
-    let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
-    
-    // Draw background if selected
-    if selected {
-        let text_width = text.len() * 8;
-        let text_height = 12;
-        for py in y..y + text_height {
-            for px in x..x + text_width {
-                if px < 640 && py < 480 {
-                    let index = (py * 640 + px) * 4;
-                    if index + 3 < frame.len() {
-                        frame[index] = bg_color[0];
-                        frame[index + 1] = bg_color[1];
-                        frame[index + 2] = bg_color[2];
-                    }
-                }
-            }
-        }
-    }
-    
-    // Draw text characters
-    for (i, ch) in text.chars().enumerate() {
-        draw_simple_char(frame, ch, x + i * 8, y, color);
-    }
-}
-
-fn draw_simple_char(frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3]) {
-    let window_width = 640;
-    let window_height = 480;
-    
-    // Simple 8x12 bitmap font patterns
-    let pattern = match ch {
-        'A' | 'a' => [
-            0b01110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11111000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'B' | 'b' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'C' | 'c' => [
-            0b01110000,
-            0b10001000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'D' | 'd' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'E' | 'e' => [
-            0b11111000,
-            0b10000000,
-            0b10000000,
-            0b11110000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'F' | 'f' => [
-            0b11111000,
-            0b10000000,
-            0b10000000,
-            0b11110000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'G' | 'g' => [
-            0b01110000,
-            0b10001000,
-            0b10000000,
-            0b10000000,
-            0b10111000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'H' | 'h' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b11111000,
-            0b11111000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'I' | 'i' => [
-            0b01110000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'L' | 'l' => [
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'M' | 'm' => [
-            0b10001000,
-            0b11011000,
-            0b10101000,
-            0b10101000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'N' | 'n' => [
-            0b10001000,
-            0b11001000,
-            0b10101000,
-            0b10101000,
-            0b10011000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'O' | 'o' => [
-            0b01110000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'P' | 'p' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b10000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'R' | 'r' => [
-            0b11110000,
-            0b10001000,
-            0b10001000,
-            0b11110000,
-            0b10100000,
-            0b10010000,
-            0b10001000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'S' | 's' => [
-            0b01111000,
-            0b10000000,
-            0b10000000,
-            0b01110000,
-            0b00001000,
-            0b00001000,
-            0b00001000,
-            0b11110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'T' | 't' => [
-            0b11111000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'U' | 'u' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'V' | 'v' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b01010000,
-            0b01010000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        'W' | 'w' => [
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10001000,
-            0b10101000,
-            0b10101000,
-            0b11011000,
-            0b10001000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '0' => [
-            0b01110000,
-            0b10001000,
-            0b10011000,
-            0b10101000,
-            0b11001000,
-            0b10001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '1' => [
-            0b00100000,
-            0b01100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b00100000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '2' => [
-            0b01110000,
-            0b10001000,
-            0b00001000,
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b10000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '3' => [
-            0b01110000,
-            0b10001000,
-            0b00001000,
-            0b00110000,
-            0b00001000,
-            0b00001000,
-            0b10001000,
-            0b01110000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ' ' => [0; 12],
-        ':' => [
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '(' => [
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b01000000,
-            0b01000000,
-            0b01000000,
-            0b00100000,
-            0b00010000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ')' => [
-            0b01000000,
-            0b00100000,
-            0b00010000,
-            0b00010000,
-            0b00010000,
-            0b00010000,
-            0b00100000,
-            0b01000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        ',' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00100000,
-            0b01000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '-' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b11111000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '+' => [
-            0b00000000,
-            0b00000000,
-            0b00100000,
-            0b00100000,
-            0b11111000,
-            0b00100000,
-            0b00100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        '.' => [
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b01100000,
-            0b01100000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-            0b00000000,
-        ],
-        _ => [0; 12], // Default to empty for unknown characters
-    };
-    
-    for (row, &byte) in pattern.iter().enumerate() {
-        for col in 0..8 {
-            if byte & (0x80 >> col) != 0 {
-                let px = x + col;
-                let py = y + row;
-                if px < window_width && py < window_height {
-                    let index = (py * window_width + px) * 4;
-                    if index + 3 < frame.len() {
-                        frame[index] = color[0];     // R
-                        frame[index + 1] = color[1]; // G
-                        frame[index + 2] = color[2]; // B
-                        frame[index + 3] = 255;      // A
-                    }
                 }
             }
         }

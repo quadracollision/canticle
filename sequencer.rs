@@ -13,6 +13,8 @@ use crate::square_menu::{SquareContextMenu, SquareMenuAction};
 use crate::programmer::ProgramExecutor;
 use crate::audio_engine::AudioEngine;
 use crate::library_gui::{LibraryGui, LibraryGuiAction};
+use crate::sample_manager::SampleManager;
+use crate::font;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -92,6 +94,7 @@ pub struct SequencerGrid {
     pub collision_cooldowns: Vec<CollisionCooldown>,
     pub library_manager: LibraryManager,
     pub library_gui: LibraryGui,
+    pub sample_manager: SampleManager,
     // State tracking for reset functionality
     pub original_cells: [[Cell; GRID_WIDTH]; GRID_HEIGHT],
     pub original_balls: Vec<Ball>,
@@ -100,6 +103,7 @@ pub struct SequencerGrid {
 impl SequencerGrid {
     pub fn new(audio_engine: AudioEngine) -> Self {
         let initial_cells = std::array::from_fn(|_| std::array::from_fn(|_| Cell::default()));
+        let sample_manager = SampleManager::new().expect("Failed to create SampleManager");
         Self {
             cells: initial_cells.clone(),
             cursor: Cursor::new(),
@@ -114,6 +118,7 @@ impl SequencerGrid {
             collision_cooldowns: Vec::new(),
             library_manager: LibraryManager::new(),
             library_gui: LibraryGui::new(),
+            sample_manager,
             // Initialize original state
             original_cells: initial_cells,
             original_balls: Vec::new(),
@@ -163,8 +168,13 @@ impl SequencerGrid {
         if x < GRID_WIDTH && y < GRID_HEIGHT {
             self.cells[y][x].clear();
             
-            // Remove any ball at this position
-            self.balls.retain(|ball| !(ball.original_x == x as f32 && ball.original_y == y as f32));
+            // Remove any ball at this position (check both original and current positions)
+            self.balls.retain(|ball| {
+                let (current_x, current_y) = ball.get_grid_position();
+                let original_x = (ball.original_x - 0.5) as usize;
+                let original_y = (ball.original_y - 0.5) as usize;
+                !(current_x == x && current_y == y) && !(original_x == x && original_y == y)
+            });
         }
     }
     
@@ -205,16 +215,29 @@ impl SequencerGrid {
     
     pub fn set_ball_sample(&mut self, ball_index: usize, sample_path: String) {
         if ball_index < self.balls.len() {
-            self.balls[ball_index].set_sample(sample_path.clone());
+            // Import sample to local folder and get local path
+            let local_path = match self.sample_manager.import_sample(&sample_path) {
+                Ok(path) => {
+                    self.log_to_console(format!("Imported sample to local folder: {}", path));
+                    path
+                },
+                Err(e) => {
+                    self.log_to_console(format!("Failed to import sample {}: {}", sample_path, e));
+                    sample_path.clone() // Fallback to original path
+                }
+            };
             
-            // Preload the sample for better performance
-            if let Err(e) = self.audio_engine.preload_sample(&sample_path) {
-                self.log_to_console(format!("Warning: Failed to preload sample {}: {}", sample_path, e));
+            // Set the local path for the ball
+            self.balls[ball_index].set_sample(local_path.clone());
+            
+            // Preload the sample for better performance using local path
+            if let Err(e) = self.audio_engine.preload_sample(&local_path) {
+                self.log_to_console(format!("Warning: Failed to preload sample {}: {}", local_path, e));
             } else {
-                self.log_to_console(format!("Preloaded sample: {}", sample_path));
+                self.log_to_console(format!("Preloaded sample: {}", local_path));
             }
             
-            // Automatically add sample to library
+            // Automatically add sample to library using original path
             self.auto_add_sample_to_library(&sample_path, "ball");
         }
     }
@@ -251,8 +274,8 @@ impl SequencerGrid {
             }
         }
         
-        // Reset all hit counts when toggling ball states
-        self.program_executor.reset_all_hit_counts();
+        // Reset all hit counts and variables when toggling ball states
+        self.program_executor.reset_all_state();
     }
     
     pub fn save_current_state_as_original(&mut self) {
@@ -324,9 +347,9 @@ impl SequencerGrid {
         use crate::ball::Direction;
         use std::path::Path;
         
-        // Extract filename without extension as sample name
+        // Extract full filename as sample name
         let sample_name = Path::new(sample_path)
-            .file_stem()
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
@@ -335,6 +358,18 @@ impl SequencerGrid {
         if self.library_manager.get_sample_template("auto", &sample_name).is_some() {
             return; // Already exists
         }
+        
+        // Copy the sample to local samples folder
+        let local_path = match self.sample_manager.import_sample(sample_path) {
+            Ok(path) => {
+                self.log_to_console(format!("Imported sample {} to local samples folder", sample_name));
+                path
+            },
+            Err(e) => {
+                self.log_to_console(format!("Failed to import sample {}: {}", sample_name, e));
+                sample_path.to_string() // Fallback to original path
+            }
+        };
         
         // Create sample template with defaults
         let sample_template = SampleTemplate {
@@ -358,7 +393,7 @@ impl SequencerGrid {
         // Add sample to auto library
         if let Some(auto_lib) = self.library_manager.sample_libraries.get_mut("auto") {
             auto_lib.samples.insert(sample_name.clone(), sample_template);
-            self.log_to_console(format!("Auto-added sample '{}' to library from {}", sample_name, sample_path));
+            self.log_to_console(format!("Auto-added sample '{}' to library from {}", sample_name, local_path));
         }
     }
     
@@ -582,6 +617,7 @@ impl SequencerGrid {
         
         // Collect create/destroy actions to process after ball iteration
         let mut create_ball_actions = Vec::new();
+        let mut create_ball_with_library_actions = Vec::new();
         let mut destroy_ball_actions = Vec::new();
         let mut create_square_actions = Vec::new();
         let mut create_square_with_program_actions = Vec::new();
@@ -654,6 +690,20 @@ impl SequencerGrid {
                         // Keep only recent collisions (last 100)
                         if self.collision_history.len() > 100 {
                             self.collision_history.pop_front();
+                        }
+                        
+                        // Automatically play ball's audio sample on collision
+                        if let Some(ref sample_path) = ball.sample_path {
+                            let current_active = self.audio_engine.get_active_sample_count();
+                            if current_active < 12 { // Conservative limit
+                                if let Err(e) = self.audio_engine.play_on_channel(0, sample_path) {
+                                    all_log_messages.push(format!("Failed to play ball audio on collision: {}", e));
+                                } else {
+                                    all_log_messages.push(format!("♪ Ball audio played: {}", sample_path.split('/').last().unwrap_or(sample_path).split('\\').last().unwrap_or(sample_path)));
+                                }
+                            } else {
+                                all_log_messages.push(format!("Ball audio skipped (audio load: {})", current_active));
+                            }
                         }
                         
                         // Check cooldown before executing program
@@ -842,23 +892,9 @@ impl SequencerGrid {
                                                         all_log_messages.push(format!("    and lib.{}", audio));
                                                     }
                                                     
-                                                    // Create ball with library function loaded
-                                                    let grid_x = x as usize;
-                                                    let grid_y = y as usize;
-                                                    if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
-                                                        let mut new_ball = Ball::new(grid_x, grid_y);
-                                                        
-                                                        // Load audio file if specified
-                                                        if let Some(ref audio_name) = audio_file {
-                                                            // Audio loading would be handled by audio system
-                                                            all_log_messages.push(format!("    Audio {} loaded into ball", audio_name));
-                                                        }
-                                                        
-                                                        new_ball.activate();
-                                                        // Use default speed and direction for library-created balls
-                                                        create_ball_actions.push((x, y, 1.0, crate::ball::Direction::Right));
-                                                        all_log_messages.push(format!("    Ball created at ({}, {})", grid_x, grid_y));
-                                                    }
+                                                    // Collect ball creation with library for processing after iteration
+                                                    create_ball_with_library_actions.push((x, y, library_function.clone(), audio_file.clone()));
+                                                    all_log_messages.push(format!("    Ball with library queued for creation at ({}, {})", x, y));
                                                 }
                                                 ProgramAction::CreateSquareWithLibrary { x, y, library_function, audio_file } => {
                                                     all_log_messages.push(format!("  → CreateSquareWithLibrary at ({}, {}) with lib.{}", x, y, library_function));
@@ -1256,6 +1292,60 @@ impl SequencerGrid {
             }
         }
         
+        // Process balls created with library audio files
+        for (x, y, library_function, audio_file) in create_ball_with_library_actions {
+            let grid_x = x.round() as usize;
+            let grid_y = y.round() as usize;
+            if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
+                let mut new_ball = Ball::new(grid_x, grid_y);
+                
+                // Load audio file if specified
+                if let Some(ref audio_name) = audio_file {
+                    // For library references, first check if the sample exists locally
+                    let sample_path = if self.sample_manager.sample_exists(audio_name) {
+                        // Sample already exists locally, get its path
+                        self.sample_manager.get_local_path(audio_name)
+                    } else {
+                        // Try to import the sample (this will handle full paths)
+                        match self.sample_manager.import_sample(audio_name) {
+                            Ok(path) => {
+                                self.log_to_console(format!("Imported sample {} to local folder", audio_name));
+                                path
+                            },
+                            Err(e) => {
+                                self.log_to_console(format!("Failed to import sample {}: {}", audio_name, e));
+                                // For library references, try to find the file in samples directory
+                                let samples_path = format!("samples/{}", audio_name);
+                                if std::path::Path::new(&samples_path).exists() {
+                                    samples_path
+                                } else {
+                                    audio_name.clone() // Final fallback
+                                }
+                            }
+                        }
+                    };
+                    
+                    new_ball.set_sample(sample_path.clone());
+                    
+                    // Preload sample to cache to avoid repeated loading using sample path
+                    if let Err(e) = self.audio_engine.preload_sample(&sample_path) {
+                        self.log_to_console(format!("Failed to preload sample {}: {}", sample_path, e));
+                    } else {
+                        self.log_to_console(format!("Audio {} loaded into ball at ({}, {})", sample_path, grid_x, grid_y));
+                    }
+                }
+                
+                new_ball.activate();
+                // Use default speed and direction for library-created balls
+                new_ball.speed = 1.0;
+                new_ball.direction = crate::ball::Direction::Right;
+                self.balls.push(new_ball);
+                self.log_to_console(format!("Ball created with library at ({}, {}) - Total balls: {}", grid_x, grid_y, self.balls.len()));
+            } else {
+                self.log_to_console(format!("Ball creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
+            }
+        }
+
         for (x, y) in destroy_ball_actions {
             let grid_x = x.round() as usize;
             let grid_y = y.round() as usize;
@@ -1309,15 +1399,15 @@ impl SequencerUI {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
         let pixels = Pixels::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)?;
         
-        // Clone the audio engine for the grid
+        // Use the same audio engine for the grid (with channels already created)
         let grid_audio_engine = AudioEngine::new().map_err(|e| Error::UserDefined(Box::new(e)))?;
         
         Ok(Self {
-            grid: SequencerGrid::new(grid_audio_engine),
+            grid: SequencerGrid::new(audio_engine),
             pixels,
             input: WinitInputHelper::new(),
             last_update: std::time::Instant::now(),
-            audio_engine,
+            audio_engine: grid_audio_engine,
         })
     }
     
@@ -1340,6 +1430,9 @@ impl SequencerUI {
                      }
                      ContextMenuAction::OpenFileDialog { ball_index } => {
                          self.open_file_dialog_for_ball(ball_index);
+                     }
+                     ContextMenuAction::AddSampleToLibrary { ball_index } => {
+                         self.add_sample_to_library_for_ball(ball_index);
                      }
                  }
                  return;
@@ -1409,10 +1502,7 @@ impl SequencerUI {
                                 }
                             }
                         }
-                        SquareMenuAction::TestProgram { square_x, square_y } => {
-                            // For testing, we could simulate a ball collision
-                            println!("Testing program for square at ({}, {})", square_x, square_y);
-                        }
+
                         SquareMenuAction::ClearPrograms { square_x, square_y } => {
                             if square_x < GRID_WIDTH && square_y < GRID_HEIGHT {
                                 self.grid.cells[square_y][square_x].program.programs.clear();
@@ -1481,8 +1571,17 @@ impl SequencerUI {
                             }
                         }
                         LibraryGuiAction::LoadSample { library_name } => {
-                            // TODO: Implement load sample functionality (open file dialog)
-                            self.grid.log_to_console(format!("Load sample into library {}", library_name));
+                            if let Some(file_path) = FileDialog::new()
+                                .add_filter("Audio Files", &["wav", "mp3"])
+                                .set_title("Select Audio Sample to Add to Library")
+                                .pick_file()
+                            {
+                                if let Some(path_str) = file_path.to_str() {
+                                    // Add sample to auto library (where samples are stored)
+                                    self.grid.auto_add_sample_to_library(path_str, "library");
+                                    self.grid.log_to_console(format!("Added sample to auto library from {}", path_str));
+                                }
+                            }
                         }
                     }
                 }
@@ -1683,629 +1782,10 @@ impl SequencerUI {
     }
     
     fn draw_menu_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
-        let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
-        
-        // Draw background if selected
-        if selected {
-            let text_width = text.len() * 8;
-            let text_height = 12;
-            for py in y..y + text_height {
-                for px in x..x + text_width {
-                    if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                        let index = (py * WINDOW_WIDTH + px) * 4;
-                        if index + 3 < frame.len() {
-                            frame[index] = bg_color[0];
-                            frame[index + 1] = bg_color[1];
-                            frame[index + 2] = bg_color[2];
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Draw text characters
-        for (i, ch) in text.chars().enumerate() {
-            Self::draw_menu_char(frame, ch, x + i * 8, y, color);
-        }
+        font::draw_text(frame, text, x, y, color, selected, WINDOW_WIDTH);
     }
     
-    fn draw_menu_char(frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3]) {
-        // 8x12 bitmap font patterns (same as menu system)
-        let pattern = match ch {
-            'A' | 'a' => [
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b11111000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'B' | 'b' => [
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b11110000,
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b11110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'C' | 'c' => [
-                0b01110000,
-                0b10001000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'D' | 'd' => [
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b11110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'E' | 'e' => [
-                0b11111000,
-                0b10000000,
-                0b10000000,
-                0b11110000,
-                0b11110000,
-                0b10000000,
-                0b10000000,
-                0b11111000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'F' | 'f' => [
-                0b11111000,
-                0b10000000,
-                0b10000000,
-                0b11110000,
-                0b11110000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'G' | 'g' => [
-                0b01110000,
-                0b10001000,
-                0b10000000,
-                0b10000000,
-                0b10011000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'H' | 'h' => [
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b11111000,
-                0b11111000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'I' | 'i' => [
-                0b01110000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'J' | 'j' => [
-                0b00111000,
-                0b00001000,
-                0b00001000,
-                0b00001000,
-                0b00001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'K' | 'k' => [
-                0b10001000,
-                0b10010000,
-                0b10100000,
-                0b11000000,
-                0b11000000,
-                0b10100000,
-                0b10010000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'L' | 'l' => [
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b11111000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'M' | 'm' => [
-                0b10001000,
-                0b11011000,
-                0b10101000,
-                0b10101000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'N' | 'n' => [
-                0b10001000,
-                0b11001000,
-                0b10101000,
-                0b10101000,
-                0b10101000,
-                0b10011000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'O' | 'o' => [
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'P' | 'p' => [
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b11110000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b10000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'Q' | 'q' => [
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10101000,
-                0b10010000,
-                0b01110000,
-                0b00001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'R' | 'r' => [
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b11110000,
-                0b10100000,
-                0b10010000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'S' | 's' => [
-                0b01110000,
-                0b10001000,
-                0b10000000,
-                0b01110000,
-                0b00001000,
-                0b00001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'T' | 't' => [
-                0b11111000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'U' | 'u' => [
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'V' | 'v' => [
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01010000,
-                0b01010000,
-                0b00100000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'W' | 'w' => [
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10101000,
-                0b10101000,
-                0b11011000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'X' | 'x' => [
-                0b10001000,
-                0b10001000,
-                0b01010000,
-                0b00100000,
-                0b00100000,
-                0b01010000,
-                0b10001000,
-                0b10001000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'Y' | 'y' => [
-                0b10001000,
-                0b10001000,
-                0b01010000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            'Z' | 'z' => [
-                0b11111000,
-                0b00001000,
-                0b00010000,
-                0b00100000,
-                0b01000000,
-                0b10000000,
-                0b10000000,
-                0b11111000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '0' => [
-                0b01110000,
-                0b10001000,
-                0b10011000,
-                0b10101000,
-                0b11001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '1' => [
-                0b00100000,
-                0b01100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b00100000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '2' => [
-                0b01110000,
-                0b10001000,
-                0b00001000,
-                0b00010000,
-                0b00100000,
-                0b01000000,
-                0b10000000,
-                0b11111000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '3' => [
-                0b01110000,
-                0b10001000,
-                0b00001000,
-                0b00110000,
-                0b00001000,
-                0b00001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '4' => [
-                0b00010000,
-                0b00110000,
-                0b01010000,
-                0b10010000,
-                0b11111000,
-                0b00010000,
-                0b00010000,
-                0b00010000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '5' => [
-                0b11111000,
-                0b10000000,
-                0b10000000,
-                0b11110000,
-                0b00001000,
-                0b00001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '6' => [
-                0b00110000,
-                0b01000000,
-                0b10000000,
-                0b11110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '7' => [
-                0b11111000,
-                0b00001000,
-                0b00010000,
-                0b00100000,
-                0b01000000,
-                0b01000000,
-                0b01000000,
-                0b01000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '8' => [
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01110000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '9' => [
-                0b01110000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b01111000,
-                0b00001000,
-                0b00010000,
-                0b01100000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            ' ' => [
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            '(' => [
-                0b00010000,
-                0b00100000,
-                0b01000000,
-                0b01000000,
-                0b01000000,
-                0b01000000,
-                0b00100000,
-                0b00010000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            ')' => [
-                0b01000000,
-                0b00100000,
-                0b00010000,
-                0b00010000,
-                0b00010000,
-                0b00010000,
-                0b00100000,
-                0b01000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            ',' => [
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b01100000,
-                0b01100000,
-                0b00100000,
-                0b01000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-            _ => [
-                0b11111000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b10001000,
-                0b11111000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-                0b00000000,
-            ],
-        };
-        
-        for (row, &byte) in pattern.iter().enumerate() {
-            for bit in 0..8 {
-                if (byte >> (7 - bit)) & 1 == 1 {
-                    let px = x + bit;
-                    let py = y + row;
-                    if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                        let idx = (py * WINDOW_WIDTH + px) * 4;
-                        if idx + 3 < frame.len() {
-                            frame[idx] = color[0];     // R
-                            frame[idx + 1] = color[1]; // G
-                            frame[idx + 2] = color[2]; // B
-                            frame[idx + 3] = 255;      // A
-                        }
-                    }
-                }
-            }
-        }
-    }
+
 
     fn draw_grid_lines_static(frame: &mut [u8]) {
         let grid_color = [60, 60, 60];
@@ -2507,6 +1987,20 @@ impl SequencerUI {
             if let Some(path_str) = file_path.to_str() {
                 self.grid.set_ball_sample(ball_index, path_str.to_string());
                 println!("Selected audio file: {}", path_str);
+            }
+        }
+    }
+    
+    fn add_sample_to_library_for_ball(&mut self, ball_index: usize) {
+        if let Some(file_path) = FileDialog::new()
+            .add_filter("Audio Files", &["wav", "mp3"])
+            .set_title("Select Audio Sample to Add to Library")
+            .pick_file()
+        {
+            if let Some(path_str) = file_path.to_str() {
+                // Add sample to library without setting it to the ball
+                self.grid.auto_add_sample_to_library(path_str, "ball");
+                println!("Added audio file to library: {}", path_str);
             }
         }
     }

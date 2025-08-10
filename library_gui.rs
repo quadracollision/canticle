@@ -2,6 +2,7 @@ use winit::event::VirtualKeyCode;
 use winit_input_helper::WinitInputHelper;
 use crate::square::{LibraryManager, Program, Cell};
 use crate::program_editor::{ProgramEditor, ProgramEditorAction};
+use crate::font;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,7 +95,7 @@ impl LibraryGui {
         self.state = match self.state {
             LibraryGuiState::Hidden => LibraryGuiState::Visible {
                 selected_column: LibraryColumn::Samples,
-                selected_library: "lib".to_string(),
+                selected_library: "auto".to_string(),
                 selected_item: 0,
                 scroll_offset: 0,
                 editing_mode: None,
@@ -203,13 +204,21 @@ impl LibraryGui {
             }
         }
 
-        if input.held_shift() && input.key_pressed(VirtualKeyCode::Space) { // Create new program
-            if matches!(selected_column, LibraryColumn::Programs) {
-                let initial_text = vec!["def new_program".to_string(), "".to_string()];
-                editing_mode = Some(EditingMode::CreateProgram {
-                    name: "new_program".to_string(),
-                    editor: ProgramEditor::new_with_text(initial_text),
-                });
+        if input.held_shift() && input.key_pressed(VirtualKeyCode::Space) { // Create new program or load sample
+            match selected_column {
+                LibraryColumn::Programs => {
+                    let initial_text = vec!["def new_program".to_string(), "".to_string()];
+                    editing_mode = Some(EditingMode::CreateProgram {
+                        name: "new_program".to_string(),
+                        editor: ProgramEditor::new_with_text(initial_text),
+                    });
+                }
+                LibraryColumn::Samples => {
+                    // Load sample
+                    result = Some(LibraryGuiAction::LoadSample {
+                        library_name: selected_library.clone(),
+                    });
+                }
             }
         }
 
@@ -833,201 +842,12 @@ impl LibraryGui {
 
 
     fn draw_text(&self, frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool, window_width: usize) {
-        let bg_color = if selected { [80, 80, 120] } else { [0, 0, 0] };
-        
-        // Draw background if selected
-        if selected {
-            let text_width = text.len() * 8;
-            let text_height = 12;
-            for py in y..y + text_height {
-                for px in x..x + text_width {
-                    if px < window_width && py < frame.len() / (window_width * 4) {
-                        let index = (py * window_width + px) * 4;
-                        if index + 3 < frame.len() {
-                            frame[index] = bg_color[0];
-                            frame[index + 1] = bg_color[1];
-                            frame[index + 2] = bg_color[2];
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Draw text characters
-        for (i, ch) in text.chars().enumerate() {
-            self.draw_char(frame, ch, x + i * 8, y, color, window_width);
-        }
+        font::draw_text(frame, text, x, y, color, selected, window_width);
     }
 
-    fn draw_char(&self, frame: &mut [u8], ch: char, x: usize, y: usize, color: [u8; 3], window_width: usize) {
-        // Simple 8x12 bitmap font (reusing patterns from existing code)
-        let pattern = match ch {
-            'A' | 'a' => [
-                0b01110000, 0b10001000, 0b10001000, 0b10001000,
-                0b11111000, 0b10001000, 0b10001000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'B' | 'b' => [
-                0b11110000, 0b10001000, 0b10001000, 0b11110000,
-                0b11110000, 0b10001000, 0b10001000, 0b11110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'C' | 'c' => [
-                0b01110000, 0b10001000, 0b10000000, 0b10000000,
-                0b10000000, 0b10000000, 0b10001000, 0b01110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'D' | 'd' => [
-                0b11110000, 0b10001000, 0b10001000, 0b10001000,
-                0b10001000, 0b10001000, 0b10001000, 0b11110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'E' | 'e' => [
-                0b11111000, 0b10000000, 0b10000000, 0b11110000,
-                0b11110000, 0b10000000, 0b10000000, 0b11111000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'F' | 'f' => [
-                0b11111000, 0b10000000, 0b10000000, 0b11110000,
-                0b11110000, 0b10000000, 0b10000000, 0b10000000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'G' | 'g' => [
-                0b01110000, 0b10001000, 0b10000000, 0b10000000,
-                0b10111000, 0b10001000, 0b10001000, 0b01110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'H' | 'h' => [
-                0b10001000, 0b10001000, 0b10001000, 0b11111000,
-                0b11111000, 0b10001000, 0b10001000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'I' | 'i' => [
-                0b01110000, 0b00100000, 0b00100000, 0b00100000,
-                0b00100000, 0b00100000, 0b00100000, 0b01110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'L' | 'l' => [
-                0b10000000, 0b10000000, 0b10000000, 0b10000000,
-                0b10000000, 0b10000000, 0b10000000, 0b11111000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'M' | 'm' => [
-                0b10001000, 0b11011000, 0b10101000, 0b10101000,
-                0b10001000, 0b10001000, 0b10001000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'N' | 'n' => [
-                0b10001000, 0b11001000, 0b10101000, 0b10101000,
-                0b10011000, 0b10001000, 0b10001000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'O' | 'o' => [
-                0b01110000, 0b10001000, 0b10001000, 0b10001000,
-                0b10001000, 0b10001000, 0b10001000, 0b01110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'P' | 'p' => [
-                0b11110000, 0b10001000, 0b10001000, 0b11110000,
-                0b10000000, 0b10000000, 0b10000000, 0b10000000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'R' | 'r' => [
-                0b11110000, 0b10001000, 0b10001000, 0b11110000,
-                0b10100000, 0b10010000, 0b10001000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'S' | 's' => [
-                0b01111000, 0b10000000, 0b10000000, 0b01110000,
-                0b00001000, 0b00001000, 0b00001000, 0b11110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'T' | 't' => [
-                0b11111000, 0b00100000, 0b00100000, 0b00100000,
-                0b00100000, 0b00100000, 0b00100000, 0b00100000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'U' | 'u' => [
-                0b10001000, 0b10001000, 0b10001000, 0b10001000,
-                0b10001000, 0b10001000, 0b10001000, 0b01110000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'V' | 'v' => [
-                0b10001000, 0b10001000, 0b10001000, 0b10001000,
-                0b10001000, 0b01010000, 0b01010000, 0b00100000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            'W' | 'w' => [
-                0b10001000, 0b10001000, 0b10001000, 0b10001000,
-                0b10101000, 0b10101000, 0b11011000, 0b10001000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            ' ' => [0; 12],
-            ':' => [
-                0b00000000, 0b00000000, 0b01100000, 0b01100000,
-                0b00000000, 0b01100000, 0b01100000, 0b00000000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            '/' => [
-                0b00000000, 0b00001000, 0b00010000, 0b00100000,
-                0b01000000, 0b10000000, 0b00000000, 0b00000000,
-                0b00000000, 0b00000000, 0b00000000, 0b00000000,
-            ],
-            _ => [0; 12], // Default to empty for unknown characters
-        };
-        
-        for (row, &byte) in pattern.iter().enumerate() {
-            for bit in 0..8 {
-                if (byte >> (7 - bit)) & 1 == 1 {
-                    let px = x + bit;
-                    let py = y + row;
-                    if px < window_width && py < frame.len() / (window_width * 4) {
-                        let idx = (py * window_width + px) * 4;
-                        if idx + 3 < frame.len() {
-                            frame[idx] = color[0];     // R
-                            frame[idx + 1] = color[1]; // G
-                            frame[idx + 2] = color[2]; // B
-                            frame[idx + 3] = 255;      // A
-                        }
-                    }
-                }
-            }
-        }
-    }
+
 
     fn draw_syntax_highlighted_text(&self, frame: &mut [u8], text: &str, x: usize, y: usize, window_width: usize) {
-        let keywords = ["def", "if", "set", "and", "then", "return", "end", "create", "with"];
-        let colors = ["c_red", "c_green", "c_blue", "c_yellow", "c_cyan", "c_magenta"];
-        let numbers = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-        
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let mut current_x = x;
-        
-        for (i, word) in words.iter().enumerate() {
-            let color = if keywords.contains(word) {
-                [100, 200, 255] // Blue for keywords
-            } else if colors.iter().any(|&c| word.contains(c)) {
-                [255, 150, 100] // Orange for color references
-            } else if word.chars().any(|c| c.is_numeric()) {
-                [150, 255, 150] // Green for numbers
-            } else if *word == "self" || *word == "hits" || *word == "times" {
-                [255, 200, 100] // Yellow for special words
-            } else {
-                [255, 255, 255] // White for regular text
-            };
-            
-            self.draw_text(frame, word, current_x, y, color, false, window_width);
-            current_x += word.len() * 8 + 8; // Move to next word position
-            
-            // Add space between words (except for last word)
-            if i < words.len() - 1 {
-                self.draw_text(frame, " ", current_x - 8, y, [255, 255, 255], false, window_width);
-            }
-        }
-        
-        // Handle case where text is empty or only whitespace
-        if words.is_empty() {
-            self.draw_text(frame, text, x, y, [255, 255, 255], false, window_width);
-        }
+        font::draw_syntax_highlighted_text(frame, text, x, y, window_width);
     }
 }

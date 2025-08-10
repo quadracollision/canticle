@@ -8,6 +8,8 @@ mod square_menu;
 mod library;
 mod library_gui;
 mod program_editor;
+mod font;
+mod sample_manager;
 
 use audio_engine::AudioEngine;
 use sequencer::run_sequencer;
