@@ -231,16 +231,33 @@ impl ProgramEditor {
         }
 
         if self.should_handle_key_repeat(input, VirtualKeyCode::Back) {
-            if self.cursor_col > 0 {
-                // Remove character before cursor
-                self.program_text[self.cursor_line].remove(self.cursor_col - 1);
-                self.cursor_col -= 1;
-            } else if self.cursor_line > 0 {
-                // Join with previous line
-                let current_line = self.program_text.remove(self.cursor_line);
-                self.cursor_col = self.program_text[self.cursor_line - 1].len();
-                self.program_text[self.cursor_line - 1].push_str(&current_line);
-                self.cursor_line -= 1;
+            if input.held_shift() {
+                // Shift+Backspace: Delete entire line
+                if self.program_text.len() > 1 {
+                    self.program_text.remove(self.cursor_line);
+                    // Adjust cursor position after line deletion
+                    if self.cursor_line >= self.program_text.len() {
+                        self.cursor_line = self.program_text.len().saturating_sub(1);
+                    }
+                    self.cursor_col = self.cursor_col.min(self.program_text[self.cursor_line].len());
+                } else {
+                    // If only one line left, just clear it
+                    self.program_text[0].clear();
+                    self.cursor_col = 0;
+                }
+            } else {
+                // Normal backspace behavior
+                if self.cursor_col > 0 {
+                    // Remove character before cursor
+                    self.program_text[self.cursor_line].remove(self.cursor_col - 1);
+                    self.cursor_col -= 1;
+                } else if self.cursor_line > 0 {
+                    // Join with previous line
+                    let current_line = self.program_text.remove(self.cursor_line);
+                    self.cursor_col = self.program_text[self.cursor_line - 1].len();
+                    self.program_text[self.cursor_line - 1].push_str(&current_line);
+                    self.cursor_line -= 1;
+                }
             }
         }
 

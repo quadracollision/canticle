@@ -330,6 +330,19 @@ impl SimpleProgramParser {
                 // Return statement should not be part of the if block - stop parsing if block
                 break;
             } else {
+                // Handle create ball/square with library reference on next line (same as parse_block)
+                if (current_line.starts_with("create ball(") || current_line.starts_with("create square(")) && i + 1 < lines.len() {
+                    let next_line = lines[i + 1].trim();
+                    if next_line.starts_with("with lib.") {
+                        let combined_line = format!("{} {}", current_line, next_line);
+                        if let Ok(instruction) = self.parse_line(&combined_line) {
+                            then_block.push(instruction);
+                            i += 2; // Skip both lines
+                            continue;
+                        }
+                    }
+                }
+                
                 // Parse instruction as part of the if block
                 if let Ok(instruction) = self.parse_line(current_line) {
                     then_block.push(instruction);
@@ -617,6 +630,9 @@ impl SimpleProgramParser {
         if coord_str == "y" {
             return Ok(Expression::BallProperty(BallProperty::Y));
         }
+        if coord_str == "speed" {
+            return Ok(Expression::BallProperty(BallProperty::Speed));
+        }
         
         // Check for arithmetic expressions like "x+1", "y-2", etc.
         for op_char in ['+', '-', '*', '/', '%'] {
@@ -624,7 +640,14 @@ impl SimpleProgramParser {
                 let left_str = coord_str[..op_pos].trim();
                 let right_str = coord_str[op_pos + 1..].trim();
                 
-                let left_expr = self.parse_coordinate_expression(left_str)?;
+                // Handle expressions that start with an operator (like "*5")
+                // In this case, treat the left side as the current ball's speed
+                let left_expr = if left_str.is_empty() {
+                    Expression::BallProperty(BallProperty::Speed)
+                } else {
+                    self.parse_coordinate_expression(left_str)?
+                };
+                
                 let right_expr = self.parse_coordinate_expression(right_str)?;
                 
                 let op = match op_char {
@@ -806,15 +829,54 @@ impl SimpleProgramParser {
     }
     
     fn parse_speed_expression(&self, speed_str: &str) -> Result<Expression, String> {
-        match speed_str {
-            "self" => Ok(Expression::BallProperty(BallProperty::Speed)),
-            _ => {
-                if let Ok(speed) = speed_str.parse::<f32>() {
-                    Ok(Expression::Literal(Value::Number(speed)))
+        let speed_str = speed_str.trim();
+        
+        // Handle 'self' as a special case for ball speed
+        if speed_str == "self" {
+            return Ok(Expression::BallProperty(BallProperty::Speed));
+        }
+        
+        // Check for arithmetic expressions involving 'self' like "self*2", "self+1", etc.
+        for op_char in ['+', '-', '*', '/', '%'] {
+            if let Some(op_pos) = speed_str.find(op_char) {
+                let left_str = speed_str[..op_pos].trim();
+                let right_str = speed_str[op_pos + 1..].trim();
+                
+                let left_expr = if left_str == "self" {
+                    Expression::BallProperty(BallProperty::Speed)
                 } else {
-                    Err(format!("Invalid speed value: {}", speed_str))
-                }
+                    self.parse_coordinate_expression(left_str)?
+                };
+                
+                let right_expr = if right_str == "self" {
+                    Expression::BallProperty(BallProperty::Speed)
+                } else {
+                    self.parse_coordinate_expression(right_str)?
+                };
+                
+                let op = match op_char {
+                    '+' => BinaryOperator::Add,
+                    '-' => BinaryOperator::Sub,
+                    '*' => BinaryOperator::Mul,
+                    '/' => BinaryOperator::Div,
+                    '%' => BinaryOperator::Mod,
+                    _ => return Err(format!("Unsupported operator: {}", op_char)),
+                };
+                
+                return Ok(Expression::BinaryOp {
+                    left: Box::new(left_expr),
+                    op,
+                    right: Box::new(right_expr),
+                });
             }
+        }
+        
+        // Try to parse as a literal number
+        if let Ok(speed) = speed_str.parse::<f32>() {
+            Ok(Expression::Literal(Value::Number(speed)))
+        } else {
+            // Try to parse as a variable or other expression
+            self.parse_coordinate_expression(speed_str)
         }
     }
     
