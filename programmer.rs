@@ -349,22 +349,43 @@ impl SimpleProgramParser {
     }
     
     fn parse_if_condition(&self, line: &str) -> Result<Expression, String> {
-        // Parse "if c_red hits self 10 times"
+        // Parse "if c_red hits self 10 times" or general expressions
         let condition_part = &line[3..].trim(); // Remove "if "
         
-        // Simple parsing for "color hits target count times"
+        // First try to parse the traditional "color hits target count times" format
         let parts: Vec<&str> = condition_part.split_whitespace().collect();
         if parts.len() >= 5 && parts[1] == "hits" && parts[4] == "times" {
             let color = parts[0];
             let target = parts[2]; // "self" or "sq(x,y)"
             let count_str = parts[3];
             
-            if let Ok(count) = count_str.parse::<u32>() {
+            // Handle modulo operations in the count part
+            if count_str.contains("/") {
+                // Parse "hit_count / 3" as modulo operation
+                let modulo_parts: Vec<&str> = count_str.split('/').collect();
+                if modulo_parts.len() == 2 {
+                    if let Ok(divisor) = modulo_parts[1].trim().parse::<f32>() {
+                        let _validated_color = self.validate_color(color)?;
+                        
+                        // Create condition: hit_count % divisor == 0
+                        return Ok(Expression::BinaryOp {
+                            left: Box::new(Expression::BinaryOp {
+                                left: Box::new(Expression::BallProperty(BallProperty::HitCount)),
+                                op: BinaryOperator::Mod,
+                                right: Box::new(Expression::Literal(Value::Number(divisor))),
+                            }),
+                            op: BinaryOperator::Equal,
+                            right: Box::new(Expression::Literal(Value::Number(0.0))),
+                        });
+                    }
+                }
+            } else if let Ok(count) = count_str.parse::<u32>() {
                 return self.create_hit_condition(color, target, count);
             }
         }
         
-        Err("Invalid if statement format".to_string())
+        // If traditional format fails, try to parse as a general expression
+        self.parse_coordinate_expression(condition_part)
     }
     
     fn parse_line(&self, line: &str) -> Result<Instruction, String> {
@@ -549,6 +570,31 @@ impl SimpleProgramParser {
                         return Ok(Instruction::SetPitch(pitch_expr));
                     } else {
                         return Err("Invalid pitch statement format. Expected: set pitch <value|note>".to_string());
+                    }
+                }
+                "volume" => {
+                    if parts.len() >= 3 {
+                        let volume_str = parts[2];
+                        
+                        // Check if it starts with + or - for relative change
+                        if volume_str.starts_with('+') || volume_str.starts_with('-') {
+                            // Relative volume change
+                            if let Ok(change) = volume_str.parse::<f32>() {
+                                return Ok(Instruction::SetVolume(Expression::BinaryOp {
+                                    left: Box::new(Expression::BallProperty(BallProperty::Volume)),
+                                    op: BinaryOperator::Add,
+                                    right: Box::new(Expression::Literal(Value::Number(change))),
+                                }));
+                            } else {
+                                return Err(format!("Invalid volume change value: {}", volume_str));
+                            }
+                        } else {
+                            // Absolute volume change - use coordinate expression parser to handle variables
+                            let volume_expr = self.parse_coordinate_expression(volume_str)?;
+                            return Ok(Instruction::SetVolume(volume_expr));
+                        }
+                    } else {
+                        return Err("Invalid volume statement format. Expected: set volume <value>".to_string());
                     }
                 }
                 _ => return Err(format!("Unknown property: {}", property)),
@@ -1006,6 +1052,7 @@ impl ProgramExecutor {
             ball_speed: ball.speed,
             ball_direction: ball.direction,
             ball_pitch: ball.pitch,
+            ball_volume: ball.volume,
             square_x,
             square_y,
         };
@@ -1047,6 +1094,11 @@ impl ProgramExecutor {
                 Instruction::SetPitch(expr) => {
                     if let Value::Number(pitch) = self.evaluate_expression(expr, context) {
                         actions.push(ProgramAction::SetPitch(pitch));
+                    }
+                }
+                Instruction::SetVolume(expr) => {
+                    if let Value::Number(volume) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetVolume(volume));
                     }
                 }
                 Instruction::Bounce => {
@@ -1271,6 +1323,7 @@ impl ProgramExecutor {
                     BallProperty::Y => Value::Number(context.ball_y),
                     BallProperty::HitCount => Value::Number(context.ball_hit_count as f32),
                     BallProperty::Pitch => Value::Number(context.ball_pitch),
+                    BallProperty::Volume => Value::Number(context.ball_volume),
                 }
             }
             Expression::Random { min, max } => {

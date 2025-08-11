@@ -14,6 +14,7 @@ use crate::programmer::ProgramExecutor;
 use crate::audio_engine::AudioEngine;
 use crate::library_gui::{LibraryGui, LibraryGuiAction};
 use crate::sample_manager::SampleManager;
+use crate::ball_audio::BallAudioSystem;
 use crate::font;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -90,6 +91,7 @@ pub struct SequencerGrid {
     pub selected_ball: Option<usize>,
     pub collision_history: VecDeque<CollisionEvent>,
     pub audio_engine: AudioEngine,
+    pub ball_audio_system: BallAudioSystem,
     pub console_messages: VecDeque<String>,
     pub collision_cooldowns: Vec<CollisionCooldown>,
     pub library_manager: LibraryManager,
@@ -114,6 +116,7 @@ impl SequencerGrid {
             selected_ball: None,
             collision_history: VecDeque::new(),
             audio_engine,
+            ball_audio_system: BallAudioSystem::new(),
             console_messages: VecDeque::new(),
             collision_cooldowns: Vec::new(),
             library_manager: LibraryManager::new(),
@@ -749,6 +752,10 @@ impl SequencerGrid {
                                                     all_log_messages.push(format!("  → SetPitch: {} (collision-specific)", pitch));
                                                     collision_pitch = pitch; // Apply pitch only for this collision
                                                 }
+                                                ProgramAction::SetVolume(volume) => {
+                                                    all_log_messages.push(format!("  → SetVolume: {}", volume));
+                                                    ball.set_volume(volume);
+                                                }
                                                 ProgramAction::Return(function_name) => {
                                                     if let Some(ref func_name) = function_name {
                                                         all_log_messages.push(format!("  → Return: calling function '{}'", func_name));
@@ -777,6 +784,7 @@ impl SequencerGrid {
                                                                 ball_speed: ball.speed,
                                                                 ball_direction: ball.direction,
                                                                 ball_pitch: ball.pitch,
+                                                                ball_volume: ball.volume,
                                                                 square_x: grid_x,
                                                                 square_y: grid_y,
                                                             };
@@ -804,6 +812,10 @@ impl SequencerGrid {
                                                                     ProgramAction::SetPitch(pitch) => {
                                                                         all_log_messages.push(format!("    Function setting pitch: {}", pitch));
                                                                         ball.set_pitch(pitch);
+                                                                    }
+                                                                    ProgramAction::SetVolume(volume) => {
+                                                                        all_log_messages.push(format!("    Function setting volume: {}", volume));
+                                                                        ball.set_volume(volume);
                                                                     }
                                                                     ProgramAction::SetDirection(direction) => {
                                                                         all_log_messages.push(format!("    Function setting direction: {:?}", direction));
@@ -851,17 +863,15 @@ impl SequencerGrid {
                                                     should_reset_position = true;
                                                 }
                                                 ProgramAction::PlaySample(sample_index) => {
-                                                    all_log_messages.push(format!("  → PlaySample: {} with collision pitch {}", sample_index, collision_pitch));
-                                                    if let Some(sample_path) = ball.sample_path.as_ref() {
-                                                        // Check if we're approaching audio engine limits
-                                                        let current_active = self.audio_engine.get_active_sample_count();
-                                                        if current_active < 12 { // Conservative limit
-                                                            if let Err(e) = self.audio_engine.play_on_channel_with_pitch(sample_index as u32, sample_path, collision_pitch) {
-                                                                eprintln!("Failed to play sample: {}", e);
-                                                            }
-                                                        } else {
-                                                            all_log_messages.push(format!("  → Skipped sample (audio load: {})", current_active));
-                                                        }
+                                                    // Use centralized audio system for PlaySample action
+                                                    if let Err(e) = self.ball_audio_system.play_sample_action(
+                                                        &self.audio_engine,
+                                                        ball,
+                                                        collision_pitch,
+                                                        sample_index as u32,
+                                                        &mut all_log_messages,
+                                                    ) {
+                                                        all_log_messages.push(format!("PlaySample audio error: {}", e));
                                                     }
                                                     // PlaySample doesn't affect ball movement, so don't reset position
                                                 }
@@ -995,6 +1005,7 @@ impl SequencerGrid {
                                                                 ball_speed: ball.speed,
                                                                 ball_direction: ball.direction,
                                                                 ball_pitch: ball.pitch,
+                                                                ball_volume: ball.volume,
                                                                 square_x: grid_x,
                                                                 square_y: grid_y,
                                                             };
@@ -1041,6 +1052,7 @@ impl SequencerGrid {
                                                                     ball_speed: ball.speed,
                                                                     ball_direction: ball.direction,
                                                                     ball_pitch: ball.pitch,
+                                                                    ball_volume: ball.volume,
                                                                     square_x: grid_x,
                                                                     square_y: grid_y,
                                                                 };
@@ -1068,6 +1080,10 @@ impl SequencerGrid {
                                                                         ProgramAction::SetPitch(pitch) => {
                                                                             all_log_messages.push(format!("      Function setting pitch: {}", pitch));
                                                                             ball.set_pitch(pitch);
+                                                                        }
+                                                                        ProgramAction::SetVolume(volume) => {
+                                                                            all_log_messages.push(format!("      Function setting volume: {}", volume));
+                                                                            ball.set_volume(volume);
                                                                         }
                                                                         ProgramAction::SetDirection(direction) => {
                                                                             all_log_messages.push(format!("      Function setting direction: {:?}", direction));
@@ -1117,18 +1133,14 @@ impl SequencerGrid {
                                             }
                                         }
                                         
-                                        // Play ball's audio sample after processing actions (using collision-specific pitch)
-                                        if let Some(ref sample_path) = ball.sample_path {
-                                            let current_active = self.audio_engine.get_active_sample_count();
-                                            if current_active < 12 { // Conservative limit
-                                                if let Err(e) = self.audio_engine.play_on_channel_with_pitch(0, sample_path, collision_pitch) {
-                                                    all_log_messages.push(format!("Failed to play ball audio on collision: {}", e));
-                                                } else {
-                                                    all_log_messages.push(format!("♪ Ball audio played with collision pitch {}: {}", collision_pitch, sample_path.split('/').last().unwrap_or(sample_path).split('\\').last().unwrap_or(sample_path)));
-                                                }
-                                            } else {
-                                                all_log_messages.push(format!("Ball audio skipped (audio load: {})", current_active));
-                                            }
+                                        // Play ball's audio sample after processing actions using centralized audio system
+                                        if let Err(e) = self.ball_audio_system.play_collision_audio(
+                                            &self.audio_engine,
+                                            ball,
+                                            collision_pitch,
+                                            &mut all_log_messages,
+                                        ) {
+                                            all_log_messages.push(format!("Ball audio system error: {}", e));
                                         }
                                         
                                         // Always bounce off squares unless an explicit bounce was already performed

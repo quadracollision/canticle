@@ -36,6 +36,7 @@ pub enum BallProperty {
     Y,
     HitCount,
     Pitch,
+    Volume,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -50,6 +51,7 @@ pub enum Instruction {
     SetSpeed(Expression),
     SetDirection(Expression),
     SetPitch(Expression),
+    SetVolume(Expression),
     Bounce,
     Stop,
     
@@ -480,6 +482,7 @@ pub struct ExecutionContext {
     pub ball_speed: f32,
     pub ball_direction: crate::ball::Direction,
     pub ball_pitch: f32,
+    pub ball_volume: f32,
     pub square_x: usize,
     pub square_y: usize,
 }
@@ -635,6 +638,11 @@ impl SquareProgram {
                 Instruction::SetPitch(expr) => {
                     if let Value::Number(pitch) = self.evaluate_expression(expr, context) {
                         actions.push(ProgramAction::SetPitch(pitch));
+                    }
+                }
+                Instruction::SetVolume(expr) => {
+                    if let Value::Number(volume) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetVolume(volume));
                     }
                 }
                 Instruction::Bounce => {
@@ -860,6 +868,7 @@ impl SquareProgram {
                     BallProperty::Y => Value::Number(context.ball_y),
                     BallProperty::HitCount => Value::Number(context.ball_hit_count as f32),
                     BallProperty::Pitch => Value::Number(context.ball_pitch),
+                    BallProperty::Volume => Value::Number(context.ball_volume),
                 }
             }
             Expression::Random { min, max } => {
@@ -907,6 +916,7 @@ pub enum ProgramAction {
     SetSpeed(f32),
     SetDirection(crate::ball::Direction),
     SetPitch(f32),
+    SetVolume(f32),
     Bounce,
     Stop,
     PlaySample(usize),

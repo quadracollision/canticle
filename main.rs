@@ -2,6 +2,7 @@ mod audio_engine;
 mod sequencer;
 mod context_menu;
 mod ball;
+mod ball_audio;
 mod square;
 mod programmer;
 mod square_menu;

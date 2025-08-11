@@ -170,6 +170,64 @@ impl AudioChannel {
         Ok(())
     }
     
+    pub fn play_file_with_pitch_and_volume(&self, file_path: &str, pitch: f32, volume: f32) -> Result<()> {
+        if self.muted {
+            return Ok(());
+        }
+        
+        // Try to resolve the file path - check if it's absolute or relative
+        let resolved_path = if std::path::Path::new(file_path).is_absolute() {
+            file_path.to_string()
+        } else {
+            // For relative paths, try multiple locations
+            let current_dir = std::env::current_dir().unwrap_or_default();
+            let libraries_path = current_dir.join("libraries").join(file_path);
+            let direct_path = current_dir.join(file_path);
+            
+            if libraries_path.exists() {
+                libraries_path.to_string_lossy().to_string()
+            } else if direct_path.exists() {
+                direct_path.to_string_lossy().to_string()
+            } else {
+                // If file doesn't exist in expected locations, try the original path anyway
+                file_path.to_string()
+            }
+        };
+        
+        // Validate and clamp pitch to safe range to prevent audio engine failures
+        let safe_pitch = pitch.clamp(0.1, 10.0); // Clamp between 0.1x and 10x speed
+        if safe_pitch != pitch {
+            log::warn!("Pitch {} clamped to safe range: {}", pitch, safe_pitch);
+        }
+        
+        log::info!("Attempting to play audio file with pitch {} and volume {}: {}", safe_pitch, volume, resolved_path);
+        
+        let file = File::open(&resolved_path).map_err(|e| {
+            log::error!("Failed to open audio file '{}': {}", resolved_path, e);
+            e
+        })?;
+        let source = Decoder::new(BufReader::new(file))?;
+        // Use the provided volume instead of the channel's volume
+        let amplified_source = source.amplify(volume);
+        // Apply pitch adjustment using speed transformation
+        let pitched_source = amplified_source.speed(safe_pitch);
+        
+        // Try to find an available sink in the pool for simultaneous playback
+        for sink in &self.sink_pool {
+            if sink.empty() {
+                sink.append(pitched_source);
+                log::info!("Audio playing on pool sink with pitch {} and volume {}: {}", safe_pitch, volume, resolved_path);
+                return Ok(());
+            }
+        }
+        
+        // If no sink is available, use the main sink (this will interrupt current playback)
+        self.sink.stop();
+        self.sink.append(pitched_source);
+        log::info!("Audio playing on main sink with pitch {} and volume {}: {}", safe_pitch, volume, resolved_path);
+        Ok(())
+    }
+    
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 2.0);
         self.sink.set_volume(self.volume);
@@ -253,6 +311,17 @@ impl AudioEngine {
         channel.play_file_with_pitch(file_path, pitch)?;
         log::info!("Playing {} on channel {} with pitch {} (active samples: {})", 
                   file_path, channel_id, pitch, self.get_active_sample_count());
+        Ok(())
+    }
+    
+    pub fn play_on_channel_with_pitch_and_volume(&self, channel_id: u32, file_path: &str, pitch: f32, volume: f32) -> Result<()> {
+        let channels = self.channels.lock().unwrap();
+        let channel = channels.get(&channel_id)
+            .ok_or(AudioError::ChannelNotFound(channel_id))?;
+        
+        channel.play_file_with_pitch_and_volume(file_path, pitch, volume)?;
+        log::info!("Playing {} on channel {} with pitch {} and volume {} (active samples: {})", 
+                  file_path, channel_id, pitch, volume, self.get_active_sample_count());
         Ok(())
     }
     
