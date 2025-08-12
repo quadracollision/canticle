@@ -404,6 +404,11 @@ impl SimpleProgramParser {
     fn parse_line(&self, line: &str) -> Result<Instruction, String> {
         let line = line.trim();
         
+        // Handle "$var" global variable declarations
+        if line.starts_with("$var ") {
+            return self.parse_global_var_statement(line);
+        }
+        
         // Handle "var" statements
         if line.starts_with("var ") {
             return self.parse_var_statement(line);
@@ -476,6 +481,30 @@ impl SimpleProgramParser {
             })
         } else {
             Err("Invalid var statement format. Expected: var variable_name = expression".to_string())
+        }
+    }
+    
+    fn parse_global_var_statement(&self, line: &str) -> Result<Instruction, String> {
+        // Parse "$var variable_name = expression"
+        let content = &line[5..].trim(); // Remove "$var "
+        
+        if let Some(eq_pos) = content.find('=') {
+            let var_name = content[..eq_pos].trim().to_string();
+            let expr_str = content[eq_pos + 1..].trim();
+            
+            if var_name.is_empty() {
+                return Err("Global variable name cannot be empty".to_string());
+            }
+            
+            // Parse the expression using the same logic as coordinate expressions
+            let value_expr = self.parse_coordinate_expression(expr_str)?;
+            
+            Ok(Instruction::SetGlobalVariable {
+                name: var_name,
+                value: value_expr,
+            })
+        } else {
+            Err("Invalid $var statement format. Expected: $var variable_name = expression".to_string())
         }
     }
     
@@ -623,6 +652,13 @@ impl SimpleProgramParser {
     fn parse_coordinate_expression(&self, coord_str: &str) -> Result<Expression, String> {
         let coord_str = coord_str.trim();
         
+        // Check for string literals (quoted strings)
+        if (coord_str.starts_with('"') && coord_str.ends_with('"') && coord_str.len() >= 2) ||
+           (coord_str.starts_with('\'') && coord_str.ends_with('\'') && coord_str.len() >= 2) {
+            let string_content = &coord_str[1..coord_str.len()-1]; // Remove quotes
+            return Ok(Expression::Literal(Value::String(string_content.to_string())));
+        }
+        
         // Check for ball properties
         if coord_str == "x" {
             return Ok(Expression::BallProperty(BallProperty::X));
@@ -672,7 +708,16 @@ impl SimpleProgramParser {
             return Ok(Expression::Literal(Value::Number(num)));
         }
         
-        // Try to parse as a variable
+        // Check if it's a global variable (starts with $)
+        if coord_str.starts_with('$') {
+            let global_var_name = &coord_str[1..]; // Remove the $ prefix
+            if global_var_name.is_empty() {
+                return Err("Global variable name cannot be empty after $".to_string());
+            }
+            return Ok(Expression::GlobalVariable(global_var_name.to_string()));
+        }
+        
+        // Try to parse as a regular variable
         Ok(Expression::Variable(coord_str.to_string()))
     }
     
@@ -1004,12 +1049,14 @@ impl SimpleProgramParser {
     fn parse_print_statement(&self, line: &str) -> Result<Instruction, String> {
         // Parse "print expression" or "print hits(target)"
         let content = &line[6..].trim(); // Remove "print "
+        println!("DEBUG: Parsing print statement with content: '{}'", content);
         
         if content.is_empty() {
             return Err("Print statement requires an expression".to_string());
         }
         
         let expr = self.parse_print_expression(content)?;
+        println!("DEBUG: Parsed print expression: {:?}", expr);
         Ok(Instruction::Print(expr))
     }
     
@@ -1120,12 +1167,27 @@ impl ProgramExecutor {
         };
         
         // Execute the program
-        let actions = self.execute_instructions(&program.instructions, &mut context);
+        let mut actions = self.execute_instructions(&program.instructions, &mut context);
         
         // Update state with any variable changes
         self.state.variables = context.variables;
         
-        actions
+        // Process SetGlobalVariable actions and remove them from the action list
+        let mut filtered_actions = Vec::new();
+        for action in actions {
+            match action {
+                ProgramAction::SetGlobalVariable { name, value } => {
+                    // Update the global variable in the state
+                    self.state.variables.insert(name, value);
+                    // Don't add this action to the filtered list as it's handled internally
+                }
+                _ => {
+                    filtered_actions.push(action);
+                }
+            }
+        }
+        
+        filtered_actions
     }
     
     fn get_ball_color(&self, ball: &Ball) -> String {
@@ -1179,6 +1241,13 @@ impl ProgramExecutor {
                 Instruction::SetVariable { name, value } => {
                     let val = self.evaluate_expression(value, context);
                     context.variables.insert(name.clone(), val);
+                }
+                Instruction::SetGlobalVariable { name, value } => {
+                    let val = self.evaluate_expression(value, context);
+                    // Note: We need to modify the state through a mutable reference
+                    // This will require changes to the function signature or using interior mutability
+                    // For now, we'll add a placeholder that will need to be handled at a higher level
+                    actions.push(ProgramAction::SetGlobalVariable { name: name.clone(), value: val });
                 }
                 Instruction::Loop { count, body } => {
                     if let Value::Number(n) = self.evaluate_expression(count, context) {
@@ -1318,13 +1387,16 @@ impl ProgramExecutor {
                     break; // Exit the instruction loop immediately
                 }
                 Instruction::Print(expr) => {
+                    println!("DEBUG: Print instruction with expression: {:?}", expr);
                     let val = self.evaluate_expression(expr, context);
+                    println!("DEBUG: Evaluated expression to value: {:?}", val);
                     let display_text = match val {
                         Value::Number(n) => n.to_string(),
                         Value::Boolean(b) => b.to_string(),
                         Value::Direction(d) => format!("{:?}", d),
                         Value::String(s) => s,
                     };
+                    println!("DEBUG: Final display text: {}", display_text);
                     actions.push(ProgramAction::Print(display_text));
                 }
                 Instruction::End => {
@@ -1371,6 +1443,10 @@ impl ProgramExecutor {
                 }
                 
                 context.variables.get(name).cloned().unwrap_or(Value::Number(0.0))
+            }
+            Expression::GlobalVariable(name) => {
+                // Look up global variable in the ProgrammerState
+                self.state.variables.get(name).cloned().unwrap_or(Value::Number(0.0))
             }
             Expression::BinaryOp { left, op, right } => {
                 let left_val = self.evaluate_expression(left, context);

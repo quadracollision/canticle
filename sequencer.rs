@@ -346,6 +346,11 @@ impl SequencerGrid {
     
     // Automatically add sample to library when loaded into ball or square
     pub fn auto_add_sample_to_library(&mut self, sample_path: &str, sample_type: &str) {
+        self.add_sample_to_library(sample_path, sample_type, "auto");
+    }
+    
+    // Add sample to specified library
+    pub fn add_sample_to_library(&mut self, sample_path: &str, sample_type: &str, library_name: &str) {
         use crate::square::{SampleTemplate, SampleLibrary};
         use crate::ball::Direction;
         use std::path::Path;
@@ -357,8 +362,9 @@ impl SequencerGrid {
             .unwrap_or("unknown")
             .to_string();
         
-        // Check if sample already exists in auto library
-        if self.library_manager.get_sample_template("auto", &sample_name).is_some() {
+        // Check if sample already exists in the specified library
+        if self.library_manager.get_sample_template(library_name, &sample_name).is_some() {
+            self.log_to_console(format!("Sample '{}' already exists in library '{}'", sample_name, library_name));
             return; // Already exists
         }
         
@@ -383,20 +389,20 @@ impl SequencerGrid {
             behavior_program: None,
         };
         
-        // Get or create auto library
-        if !self.library_manager.sample_libraries.contains_key("auto") {
-            let auto_library = SampleLibrary {
-                name: "auto".to_string(),
+        // Get or create the specified library
+        if !self.library_manager.sample_libraries.contains_key(library_name) {
+            let new_library = SampleLibrary {
+                name: library_name.to_string(),
                 samples: std::collections::HashMap::new(),
-                description: "Automatically generated samples from loaded files".to_string(),
+                description: format!("Sample library: {}", library_name),
             };
-            self.library_manager.add_sample_library(auto_library);
+            self.library_manager.add_sample_library(new_library);
         }
         
-        // Add sample to auto library
-        if let Some(auto_lib) = self.library_manager.sample_libraries.get_mut("auto") {
-            auto_lib.samples.insert(sample_name.clone(), sample_template);
-            self.log_to_console(format!("Auto-added sample '{}' to library from {}", sample_name, local_path));
+        // Add sample to the specified library
+        if let Some(lib) = self.library_manager.sample_libraries.get_mut(library_name) {
+            lib.samples.insert(sample_name.clone(), sample_template);
+            self.log_to_console(format!("Added sample '{}' to library '{}' from {}", sample_name, library_name, local_path));
         }
     }
     
@@ -976,10 +982,38 @@ impl SequencerGrid {
                                                 }
                                                 ProgramAction::Print(text) => {
                                                     all_log_messages.push(format!("  → Print: {}", text));
+                                                    
                                                     // Store the printed text on the current square for visual display
                                                     if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
                                                         if self.cells[grid_y][grid_x].content == CellContent::Square {
-                                                            self.cells[grid_y][grid_x].display_text = Some(text.clone());
+                                                            // Truncate text to fit in square (max ~10 characters per line)
+                                                            let truncated_text = if text.len() > 10 {
+                                                                format!("{}...", &text[..7])
+                                                            } else {
+                                                                text.clone()
+                                                            };
+                                                            
+                                                            // Get existing text and split into lines
+                                                            let existing_text = self.cells[grid_y][grid_x].display_text
+                                                                .as_ref()
+                                                                .cloned()
+                                                                .unwrap_or_default();
+                                                            
+                                                            let mut lines: Vec<String> = existing_text.split('\n')
+                                                                .map(|s| s.to_string())
+                                                                .collect();
+                                                            
+                                                            // Ensure we have at least 3 lines
+                                                            while lines.len() < 3 {
+                                                                lines.push(String::new());
+                                                            }
+                                                            
+                                                            // Set the third line to the print output
+                                                            lines[2] = truncated_text;
+                                                            
+                                                            // Join back into display text
+                                                            let formatted_text = lines.join("\n");
+                                                            self.cells[grid_y][grid_x].display_text = Some(formatted_text);
                                                         }
                                                     }
                                                 }
@@ -1441,6 +1475,12 @@ pub struct SequencerUI {
     input: WinitInputHelper,
     last_update: std::time::Instant,
     audio_engine: AudioEngine,
+    // Label editing state
+    label_editing_mode: bool,
+    label_editing_x: usize,
+    label_editing_y: usize,
+    current_label: String,
+    label_editing_line: usize, // 0 for first line, 1 for second line
 }
 
 impl SequencerUI {
@@ -1458,11 +1498,21 @@ impl SequencerUI {
             input: WinitInputHelper::new(),
             last_update: std::time::Instant::now(),
             audio_engine: grid_audio_engine,
+            label_editing_mode: false,
+            label_editing_x: 0,
+            label_editing_y: 0,
+            current_label: String::new(),
+            label_editing_line: 0,
         })
     }
     
     pub fn handle_input(&mut self, event: &Event<()>) {
         if self.input.update(event) {
+            // Handle label editing mode first
+            if self.label_editing_mode {
+                self.handle_label_editing_input();
+                return;
+            }
             // Handle context menu input first
             if let Some(action) = self.grid.context_menu.handle_input(&self.input, &self.grid.balls) {
                  match action {
@@ -1687,9 +1737,20 @@ impl SequencerUI {
                                 .pick_file()
                             {
                                 if let Some(path_str) = file_path.to_str() {
-                                    // Add sample to auto library (where samples are stored)
-                                    self.grid.auto_add_sample_to_library(path_str, "library");
-                                    self.grid.log_to_console(format!("Added sample to auto library from {}", path_str));
+                                    // Add sample to the selected library
+                                    self.grid.add_sample_to_library(path_str, "library", &library_name);
+                                }
+                            }
+                        }
+                        LibraryGuiAction::LoadAutoSample => {
+                            if let Some(file_path) = FileDialog::new()
+                                .add_filter("Audio Files", &["wav", "mp3"])
+                                .set_title("Select Audio Sample to Load Directly into Balls")
+                                .pick_file()
+                            {
+                                if let Some(path_str) = file_path.to_str() {
+                                    // Add sample to the auto library for direct ball usage
+                                    self.grid.auto_add_sample_to_library(path_str, "ball");
                                 }
                             }
                         }
@@ -1720,9 +1781,23 @@ impl SequencerUI {
                 self.grid.cursor.move_right();
             }
             
-            // Shape placement
+            // Shape placement / Label editing
             if self.input.key_pressed(VirtualKeyCode::S) {
-                self.grid.place_square(self.grid.cursor.x, self.grid.cursor.y);
+                let cursor_x = self.grid.cursor.x;
+                let cursor_y = self.grid.cursor.y;
+                
+                // Check if there's already a square at cursor position
+                if cursor_x < GRID_WIDTH && cursor_y < GRID_HEIGHT && 
+                   self.grid.cells[cursor_y][cursor_x].content == CellContent::Square {
+                    // Enter label editing mode
+                    self.label_editing_mode = true;
+                    self.label_editing_x = cursor_x;
+                    self.label_editing_y = cursor_y;
+                    self.current_label = self.grid.cells[cursor_y][cursor_x].display_text.clone().unwrap_or_default();
+                } else {
+                    // Place a new square
+                    self.grid.place_square(cursor_x, cursor_y);
+                }
             }
             if self.input.key_pressed(VirtualKeyCode::C) {
                  self.grid.place_ball(self.grid.cursor.x, self.grid.cursor.y);
@@ -1786,6 +1861,108 @@ impl SequencerUI {
         }
     }
     
+    fn handle_label_editing_input(&mut self) {
+        // Handle Return key - move to next line or save and exit
+        if self.input.key_pressed(VirtualKeyCode::Return) {
+            if self.label_editing_line == 0 {
+                // Move to second line
+                self.label_editing_line = 1;
+                if self.current_label.len() < 4 {
+                    // Pad first line to 4 characters with spaces
+                    while self.current_label.len() < 4 {
+                        self.current_label.push(' ');
+                    }
+                }
+                self.current_label.push('\n'); // Add newline separator
+            } else {
+                // Save and exit from second line
+                if self.label_editing_x < GRID_WIDTH && self.label_editing_y < GRID_HEIGHT {
+                    let label = if self.current_label.trim().is_empty() {
+                        None
+                    } else {
+                        Some(self.current_label.clone())
+                    };
+                    self.grid.cells[self.label_editing_y][self.label_editing_x].display_text = label;
+                }
+                self.exit_label_editing_mode();
+            }
+            return;
+        }
+        
+        // Handle Escape key - cancel and exit
+        if self.input.key_pressed(VirtualKeyCode::Escape) {
+            self.exit_label_editing_mode();
+            return;
+        }
+        
+        // Handle Backspace - remove last character
+        if self.input.key_pressed(VirtualKeyCode::Back) {
+            self.current_label.pop();
+            return;
+        }
+        
+        // Handle character input
+        let current_line_length = if self.label_editing_line == 0 {
+            self.current_label.len()
+        } else {
+            // Count characters after the newline
+            self.current_label.split('\n').last().unwrap_or("").len()
+        };
+        
+        if current_line_length < 4 {
+            // Check for letter keys
+            for (keycode, ch_lower, ch_upper) in [
+                (VirtualKeyCode::A, 'a', 'A'), (VirtualKeyCode::B, 'b', 'B'), (VirtualKeyCode::C, 'c', 'C'),
+                (VirtualKeyCode::D, 'd', 'D'), (VirtualKeyCode::E, 'e', 'E'), (VirtualKeyCode::F, 'f', 'F'),
+                (VirtualKeyCode::G, 'g', 'G'), (VirtualKeyCode::H, 'h', 'H'), (VirtualKeyCode::I, 'i', 'I'),
+                (VirtualKeyCode::J, 'j', 'J'), (VirtualKeyCode::K, 'k', 'K'), (VirtualKeyCode::L, 'l', 'L'),
+                (VirtualKeyCode::M, 'm', 'M'), (VirtualKeyCode::N, 'n', 'N'), (VirtualKeyCode::O, 'o', 'O'),
+                (VirtualKeyCode::P, 'p', 'P'), (VirtualKeyCode::Q, 'q', 'Q'), (VirtualKeyCode::R, 'r', 'R'),
+                (VirtualKeyCode::S, 's', 'S'), (VirtualKeyCode::T, 't', 'T'), (VirtualKeyCode::U, 'u', 'U'),
+                (VirtualKeyCode::V, 'v', 'V'), (VirtualKeyCode::W, 'w', 'W'), (VirtualKeyCode::X, 'x', 'X'),
+                (VirtualKeyCode::Y, 'y', 'Y'), (VirtualKeyCode::Z, 'z', 'Z'),
+            ] {
+                if self.input.key_pressed(keycode) {
+                    let ch = if self.input.held_shift() { ch_upper } else { ch_lower };
+                    self.current_label.push(ch);
+                    return;
+                }
+            }
+            
+            // Check for number keys
+            for (keycode, ch_normal, ch_shift) in [
+                (VirtualKeyCode::Key0, '0', ')'), (VirtualKeyCode::Key1, '1', '!'), (VirtualKeyCode::Key2, '2', '@'),
+                (VirtualKeyCode::Key3, '3', '#'), (VirtualKeyCode::Key4, '4', '$'), (VirtualKeyCode::Key5, '5', '%'),
+                (VirtualKeyCode::Key6, '6', '^'), (VirtualKeyCode::Key7, '7', '&'), (VirtualKeyCode::Key8, '8', '*'),
+                (VirtualKeyCode::Key9, '9', '('),
+            ] {
+                if self.input.key_pressed(keycode) {
+                    let ch = if self.input.held_shift() { ch_shift } else { ch_normal };
+                    self.current_label.push(ch);
+                    return;
+                }
+            }
+            
+            // Check for space and common symbols
+            if self.input.key_pressed(VirtualKeyCode::Space) {
+                self.current_label.push(' ');
+            } else if self.input.key_pressed(VirtualKeyCode::Minus) {
+                let ch = if self.input.held_shift() { '_' } else { '-' };
+                self.current_label.push(ch);
+            } else if self.input.key_pressed(VirtualKeyCode::Equals) {
+                let ch = if self.input.held_shift() { '+' } else { '=' };
+                self.current_label.push(ch);
+            }
+        }
+    }
+    
+    fn exit_label_editing_mode(&mut self) {
+        self.label_editing_mode = false;
+        self.current_label.clear();
+        self.label_editing_line = 0;
+    }
+    
+
     pub fn render(&mut self) -> Result<(), Error> {
         // Calculate delta time for smooth movement
         let now = std::time::Instant::now();
@@ -1825,8 +2002,29 @@ impl SequencerUI {
             for x in 0..GRID_WIDTH {
                 let cell = &self.grid.cells[y][x];
                 match cell.content {
-                    CellContent::Square => Self::draw_square_static(frame, x, y, cell.color, &cell.display_text),
-
+                    CellContent::Square => {
+                        // Check if this square is being edited
+                        let display_text = if self.label_editing_mode && 
+                                             self.label_editing_x == x && 
+                                             self.label_editing_y == y {
+                            // Show current label being typed with cursor on appropriate line
+                            if self.label_editing_line == 0 {
+                                // Cursor on first line
+                                Some(format!("{}_", self.current_label))
+                            } else {
+                                // Cursor on second line - add cursor after the newline content
+                                let parts: Vec<&str> = self.current_label.split('\n').collect();
+                                if parts.len() >= 2 {
+                                    Some(format!("{}\n{}_", parts[0], parts[1]))
+                                } else {
+                                    Some(format!("{}_", self.current_label))
+                                }
+                            }
+                        } else {
+                            cell.display_text.clone()
+                        };
+                        Self::draw_square_static(frame, x, y, cell.color, &display_text);
+                    }
                     CellContent::Empty => {}
                 }
             }
@@ -1962,7 +2160,16 @@ impl SequencerUI {
         if let Some(text) = display_text {
             let text_x = start_x + 4;
             let text_y = start_y + 4;
-            font::draw_text(frame, text, text_x, text_y, [255, 255, 255], false, WINDOW_WIDTH);
+            
+            // Handle multi-line text by splitting on newlines
+            let lines: Vec<&str> = text.split('\n').collect();
+            for (line_index, line) in lines.iter().enumerate() {
+                let line_y = text_y + (line_index * 12); // 12 pixels per line (font height)
+                // Only draw if the line fits within the cell
+                if line_y + 12 <= end_y {
+                    font::draw_text(frame, line, text_x, line_y, [255, 255, 255], false, WINDOW_WIDTH);
+                }
+            }
         }
     }
     

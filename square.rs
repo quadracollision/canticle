@@ -16,6 +16,7 @@ pub enum Value {
 pub enum Expression {
     Literal(Value),
     Variable(String),
+    GlobalVariable(String),
     BinaryOp { left: Box<Expression>, op: BinaryOperator, right: Box<Expression> },
     BallProperty(BallProperty),
     Random { min: f32, max: f32 },
@@ -57,6 +58,7 @@ pub enum Instruction {
     
     // Variables
     SetVariable { name: String, value: Expression },
+    SetGlobalVariable { name: String, value: Expression },
     
     // Control flow
     If { condition: Expression, then_block: Vec<Instruction>, else_block: Option<Vec<Instruction>> },
@@ -655,6 +657,10 @@ impl SquareProgram {
                     let val = self.evaluate_expression(value, context);
                     context.variables.insert(name.clone(), val);
                 }
+                Instruction::SetGlobalVariable { name, value } => {
+                    let val = self.evaluate_expression(value, context);
+                    actions.push(ProgramAction::SetGlobalVariable { name: name.clone(), value: val });
+                }
                 Instruction::If { condition, then_block, else_block } => {
                     if let Value::Boolean(true) = self.evaluate_expression(condition, context) {
                         actions.extend(self.execute_instructions(then_block, context));
@@ -815,13 +821,16 @@ impl SquareProgram {
                     }
                 }
                 Instruction::Print(expr) => {
+                    println!("DEBUG SQUARE: Print instruction with expression: {:?}", expr);
                     let val = self.evaluate_expression(expr, context);
+                    println!("DEBUG SQUARE: Evaluated expression to value: {:?}", val);
                     let display_text = match val {
                         Value::Number(n) => n.to_string(),
                         Value::Boolean(b) => b.to_string(),
                         Value::Direction(d) => format!("{:?}", d),
                         Value::String(s) => s,
                     };
+                    println!("DEBUG SQUARE: Final display text: {}", display_text);
                     actions.push(ProgramAction::Print(display_text));
                 }
                 Instruction::ExecuteProgram(program) => {
@@ -854,6 +863,12 @@ impl SquareProgram {
             Expression::Literal(value) => value.clone(),
             Expression::Variable(name) => {
                 context.variables.get(name).cloned().unwrap_or(Value::Number(0.0))
+            }
+            Expression::GlobalVariable(name) => {
+                // For now, global variables are not accessible in square.rs context
+                // This would need to be passed through the context or handled differently
+                // Defaulting to 0.0 for now
+                Value::Number(0.0)
             }
             Expression::BinaryOp { left, op, right } => {
                 let left_val = self.evaluate_expression(left, context);
@@ -934,6 +949,7 @@ pub enum ProgramAction {
     Print(String),
     ExecuteProgram(Program),
     ExecuteLibraryFunction { library_function: String },
+    SetGlobalVariable { name: String, value: Value },
     ContinueToNext,
     Return(Option<String>), // None = simple return, Some(name) = call function and return
     End, // Natural end of block

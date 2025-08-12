@@ -11,6 +11,18 @@ pub enum ProgramSource {
     Square { x: usize, y: usize, program_index: usize },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SampleSource {
+    Auto,
+    Library { library_name: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct SampleEntry {
+    pub name: String,
+    pub source: SampleSource,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProgramEntry {
     pub name: String,
@@ -66,6 +78,7 @@ pub enum LibraryGuiAction {
     EditProgram { source: ProgramSource, name: String, program: Program, raw_text: Vec<String> },
     OpenSquareScript { x: usize, y: usize, program_index: usize },
     LoadSample { library_name: String },
+    LoadAutoSample,
     SaveProgramToFile { editor: ProgramEditor },
     LoadProgramFromFile,
 }
@@ -249,10 +262,20 @@ impl LibraryGui {
                     });
                 }
                 LibraryColumn::Samples => {
-                    // Load sample
-                    result = Some(LibraryGuiAction::LoadSample {
-                        library_name: selected_library.clone(),
-                    });
+                    // Check if the selected sample is auto or library
+                    let all_samples = self.collect_all_samples(library_manager, &selected_library);
+                    if let Some(sample_entry) = all_samples.get(selected_item) {
+                        match &sample_entry.source {
+                            SampleSource::Auto => {
+                                result = Some(LibraryGuiAction::LoadAutoSample);
+                            },
+                            SampleSource::Library { library_name } => {
+                                result = Some(LibraryGuiAction::LoadSample {
+                                    library_name: library_name.clone(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -465,10 +488,7 @@ impl LibraryGui {
     fn get_item_count(&self, library_manager: &LibraryManager, column: &LibraryColumn, library_name: &str, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> usize {
         match column {
             LibraryColumn::Samples => {
-                library_manager.sample_libraries
-                    .get(library_name)
-                    .map(|lib| lib.samples.len())
-                    .unwrap_or(0)
+                self.collect_all_samples(library_manager, library_name).len()
             },
             LibraryColumn::Programs => {
                 self.collect_all_programs(library_manager, grid).len()
@@ -479,12 +499,8 @@ impl LibraryGui {
     fn get_selected_item_name(&self, library_manager: &LibraryManager, column: &LibraryColumn, library_name: &str, index: usize, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Option<String> {
         match column {
             LibraryColumn::Samples => {
-                library_manager.sample_libraries
-                    .get(library_name)?
-                    .samples
-                    .keys()
-                    .nth(index)
-                    .cloned()
+                let all_samples = self.collect_all_samples(library_manager, library_name);
+                all_samples.get(index).map(|entry| entry.name.clone())
             },
             LibraryColumn::Programs => {
                 let all_programs = self.collect_all_programs(library_manager, grid);
@@ -500,6 +516,34 @@ impl LibraryGui {
                 })
             },
         }
+    }
+
+    fn collect_all_samples(&self, library_manager: &LibraryManager, selected_library: &str) -> Vec<SampleEntry> {
+        let mut all_samples = Vec::new();
+        
+        // Add auto samples first
+        if let Some(auto_library) = library_manager.sample_libraries.get("auto") {
+            for (name, _sample) in &auto_library.samples {
+                all_samples.push(SampleEntry {
+                    name: format!("{} (auto)", name),
+                    source: SampleSource::Auto,
+                });
+            }
+        }
+        
+        // Add library samples if it's not the auto library
+        if selected_library != "auto" {
+            if let Some(library) = library_manager.sample_libraries.get(selected_library) {
+                for (name, _sample) in &library.samples {
+                    all_samples.push(SampleEntry {
+                        name: format!("{} ({})", name, selected_library),
+                        source: SampleSource::Library { library_name: selected_library.to_string() },
+                    });
+                }
+            }
+        }
+        
+        all_samples
     }
 
     fn collect_all_programs(&self, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Vec<ProgramEntry> {
@@ -877,41 +921,43 @@ impl LibraryGui {
     fn draw_sample_column(&self, frame: &mut [u8], x: usize, y: usize, library_manager: &LibraryManager, 
                          selected_library: &str, selected_column: &LibraryColumn, 
                          selected_item: usize, scroll_offset: usize, window_width: usize) {
-        if let Some(library) = library_manager.sample_libraries.get(selected_library) {
-            let start_y = y + HEADER_HEIGHT + 5;
-            let is_column_selected = matches!(selected_column, LibraryColumn::Samples);
+        let all_samples = self.collect_all_samples(library_manager, selected_library);
+        let start_y = y + HEADER_HEIGHT + 5;
+        let is_column_selected = matches!(selected_column, LibraryColumn::Samples);
+        
+        for (i, sample_entry) in all_samples.iter().enumerate().skip(scroll_offset).take(MAX_VISIBLE_ITEMS) {
+            let item_y = start_y + (i - scroll_offset) * ITEM_HEIGHT;
+            let is_selected = is_column_selected && (i) == selected_item;
             
-            for (i, (name, _sample)) in library.samples.iter().enumerate().skip(scroll_offset).take(MAX_VISIBLE_ITEMS) {
-                let item_y = start_y + i * ITEM_HEIGHT;
-                let is_selected = is_column_selected && (i + scroll_offset) == selected_item;
-                
-                // Draw selection background
-                if is_selected {
-                    for dx in 0..(COLUMN_WIDTH - 10) {
-                        for dy in 0..(ITEM_HEIGHT - 2) {
-                            let px = x + 8 + dx;
-                            let py = item_y - 2 + dy;
-                            if px < window_width && py < frame.len() / (window_width * 4) {
-                                let idx = (py * window_width + px) * 4;
-                                if idx + 3 < frame.len() {
-                                    frame[idx] = frame[idx].saturating_add(25);
-                                    frame[idx + 1] = frame[idx + 1].saturating_add(25);
-                                    frame[idx + 2] = frame[idx + 2].saturating_add(35);
-                                }
+            // Draw selection background
+            if is_selected {
+                for dx in 0..(COLUMN_WIDTH - 10) {
+                    for dy in 0..(ITEM_HEIGHT - 2) {
+                        let px = x + 8 + dx;
+                        let py = item_y - 2 + dy;
+                        if px < window_width && py < frame.len() / (window_width * 4) {
+                            let idx = (py * window_width + px) * 4;
+                            if idx + 3 < frame.len() {
+                                frame[idx] = frame[idx].saturating_add(25);
+                                frame[idx + 1] = frame[idx + 1].saturating_add(25);
+                                frame[idx + 2] = frame[idx + 2].saturating_add(35);
                             }
                         }
                     }
                 }
-                
-                // Draw sample icon
-                font::draw_text(frame, "♪", x + 15, item_y, 
-                              if is_selected { [100, 200, 255] } else { [120, 120, 150] }, 
-                              false, window_width);
-                
-                self.draw_text(frame, name, x + 30, item_y, 
-                              if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
-                              is_selected, window_width);
             }
+            
+            // Draw sample icon with different colors for auto vs library samples
+            let icon_color = match &sample_entry.source {
+                SampleSource::Auto => if is_selected { [255, 150, 100] } else { [180, 120, 80] },
+                SampleSource::Library { .. } => if is_selected { [100, 200, 255] } else { [120, 120, 150] },
+            };
+            
+            font::draw_text(frame, "♪", x + 15, item_y, icon_color, false, window_width);
+            
+            self.draw_text(frame, &sample_entry.name, x + 30, item_y, 
+                          if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
+                          is_selected, window_width);
         }
     }
 
