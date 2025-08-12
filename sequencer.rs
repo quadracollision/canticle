@@ -1559,14 +1559,25 @@ impl SequencerUI {
                                 self.grid.cells[square_y][square_x].program.set_active_program(None);
                             }
                         }
+                        SquareMenuAction::SaveProgramToFile => {
+                            let program_name = self.grid.square_menu.program_editor.get_program_name();
+                            let program_text = self.grid.square_menu.program_editor.get_program_text();
+                            self.save_program_to_file_with_data(program_name, program_text);
+                        }
+                        SquareMenuAction::LoadProgramFromFile => {
+                            self.load_program_from_file();
+                        }
                     }
                 }
                 return; // Don't process other input while square menu is open
             }
 
-            // Library GUI toggle (G key) - always available
+            // Library GUI open (G key) - only opens, never closes
             if self.input.key_pressed(VirtualKeyCode::G) {
-                self.grid.library_gui.toggle();
+                // Only open if hidden
+                if !self.grid.library_gui.is_visible() {
+                    self.grid.library_gui.toggle();
+                }
             }
             
             // Handle library GUI input if visible
@@ -1681,6 +1692,14 @@ impl SequencerUI {
                                     self.grid.log_to_console(format!("Added sample to auto library from {}", path_str));
                                 }
                             }
+                        }
+                        LibraryGuiAction::SaveProgramToFile { editor } => {
+                            let program_name = editor.get_program_name();
+                            let program_text = editor.get_program_text();
+                            self.save_program_to_file_with_data(program_name, program_text);
+                        }
+                        LibraryGuiAction::LoadProgramFromFile => {
+                            self.load_program_from_file();
                         }
                     }
                 }
@@ -2107,6 +2126,61 @@ impl SequencerUI {
                 // Add sample to library without setting it to the ball
                 self.grid.auto_add_sample_to_library(path_str, "ball");
                 println!("Added audio file to library: {}", path_str);
+            }
+        }
+    }
+
+    fn save_program_to_file_with_data(&mut self, program_name: String, program_text: Vec<String>) {
+        let default_filename = format!("{}.cant", program_name);
+        
+        if let Some(file_path) = FileDialog::new()
+            .add_filter("Canticlec Programs", &["cant"])
+            .set_title("Save Program")
+            .set_file_name(&default_filename)
+            .save_file()
+        {
+            if let Some(path_str) = file_path.to_str() {
+                let program_text_str = program_text.join("\n");
+                match std::fs::write(&file_path, program_text_str) {
+                    Ok(_) => {
+                        self.grid.log_to_console(format!("Program saved to: {}", path_str));
+                    }
+                    Err(e) => {
+                        self.grid.log_to_console(format!("Failed to save program: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    fn load_program_from_file(&mut self) {
+        if let Some(file_path) = FileDialog::new()
+            .add_filter("Canticlec Programs", &["cant"])
+            .set_title("Load Program")
+            .pick_file()
+        {
+            if let Some(path_str) = file_path.to_str() {
+                match std::fs::read_to_string(&file_path) {
+                    Ok(content) => {
+                        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                        
+                        // Update the appropriate editor based on current context
+                        if self.grid.library_gui.is_visible() {
+                            // Update library GUI editor
+                            if let Some(editor) = self.grid.library_gui.get_current_editor_mut() {
+                                *editor = crate::program_editor::ProgramEditor::new_with_text(lines);
+                            }
+                        } else if self.grid.square_menu.is_open() {
+                            // Update square menu editor
+                            self.grid.square_menu.program_editor = crate::program_editor::ProgramEditor::new_with_text(lines);
+                        }
+                        
+                        self.grid.log_to_console(format!("Program loaded from: {}", path_str));
+                    }
+                    Err(e) => {
+                        self.grid.log_to_console(format!("Failed to load program: {}", e));
+                    }
+                }
             }
         }
     }

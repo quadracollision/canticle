@@ -66,6 +66,8 @@ pub enum LibraryGuiAction {
     EditProgram { source: ProgramSource, name: String, program: Program, raw_text: Vec<String> },
     OpenSquareScript { x: usize, y: usize, program_index: usize },
     LoadSample { library_name: String },
+    SaveProgramToFile { editor: ProgramEditor },
+    LoadProgramFromFile,
 }
 
 const LIBRARY_GUI_WIDTH: usize = 580;
@@ -96,7 +98,7 @@ impl LibraryGui {
         self.state = match self.state {
             LibraryGuiState::Hidden => LibraryGuiState::Visible {
                 selected_column: LibraryColumn::Samples,
-                selected_library: "auto".to_string(),
+                selected_library: "lib".to_string(),
                 selected_item: 0,
                 scroll_offset: 0,
                 editing_mode: None,
@@ -107,6 +109,26 @@ impl LibraryGui {
 
     pub fn is_visible(&self) -> bool {
         matches!(self.state, LibraryGuiState::Visible { .. })
+    }
+
+    pub fn is_editing(&self) -> bool {
+        if let LibraryGuiState::Visible { editing_mode, .. } = &self.state {
+            editing_mode.is_some()
+        } else {
+            false
+        }
+    }
+
+    pub fn get_current_editor_mut(&mut self) -> Option<&mut ProgramEditor> {
+        if let LibraryGuiState::Visible { editing_mode: Some(ref mut edit_mode), .. } = &mut self.state {
+            match edit_mode {
+                EditingMode::CreateProgram { editor, .. } => Some(editor),
+                EditingMode::EditProgram { editor, .. } => Some(editor),
+                EditingMode::RenameItem { .. } => None,
+            }
+        } else {
+            None
+        }
     }
 
     pub fn handle_input(&mut self, input: &WinitInputHelper, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Option<LibraryGuiAction> {
@@ -127,7 +149,13 @@ impl LibraryGui {
         // Handle editing mode input
         if let Some(ref mut edit_mode) = editing_mode {
             let result = self.handle_editing_input(input, edit_mode, &selected_library);
-            // Update state
+            // Update state - but don't overwrite editing_mode if it was set to None by handle_editing_input
+            if let LibraryGuiState::Visible { editing_mode: ref current_editing_mode, .. } = &self.state {
+                if current_editing_mode.is_none() {
+                    // handle_editing_input already updated the state to None, don't overwrite it
+                    return result;
+                }
+            }
             self.state = LibraryGuiState::Visible {
                 selected_column,
                 selected_library,
@@ -136,6 +164,12 @@ impl LibraryGui {
                 editing_mode,
             };
             return result;
+        }
+
+        // Handle escape key to close library when not in editing mode
+        if input.key_pressed(VirtualKeyCode::Escape) {
+            self.state = LibraryGuiState::Hidden;
+            return None;
         }
 
         // Navigation between columns
@@ -298,11 +332,11 @@ impl LibraryGui {
                 // TODO: Handle character input for editing the name
             },
             EditingMode::CreateProgram { name, editor } => {
-                match editor.handle_input(input) {
+                match editor.handle_input_with_context(input, true) {
                     ProgramEditorAction::SaveAndCompile => {
                         let program = editor.get_program();
                         let action = Some(LibraryGuiAction::CreateProgram {
-                            library_name: selected_library.to_string(),
+                            library_name: "lib".to_string(), // Always save user-created programs to lib
                             name: program.name.clone(),
                             program,
                         });
@@ -322,7 +356,7 @@ impl LibraryGui {
                     },
                     ProgramEditorAction::SaveProgram(program) => {
                         let action = Some(LibraryGuiAction::CreateProgram {
-                            library_name: selected_library.to_string(),
+                            library_name: "lib".to_string(), // Always save user-created programs to lib
                             name: program.name.clone(),
                             program,
                         });
@@ -330,6 +364,12 @@ impl LibraryGui {
                             *editing_mode = None;
                         }
                         return action;
+                    },
+                    ProgramEditorAction::SaveToFile => {
+                        return Some(LibraryGuiAction::SaveProgramToFile { editor: editor.clone() });
+                    },
+                    ProgramEditorAction::LoadFromFile => {
+                        return Some(LibraryGuiAction::LoadProgramFromFile);
                     },
                     ProgramEditorAction::None => {
                         // Do nothing
@@ -337,7 +377,7 @@ impl LibraryGui {
                 }
             },
             EditingMode::EditProgram { name, source, editor } => {
-                match editor.handle_input(input) {
+                match editor.handle_input_with_context(input, true) {
                     ProgramEditorAction::SaveAndCompile => {
                         let program = editor.get_program();
                         let raw_text = editor.get_program_text();
@@ -373,6 +413,12 @@ impl LibraryGui {
                             *editing_mode = None;
                         }
                         return action;
+                    },
+                    ProgramEditorAction::SaveToFile => {
+                        return Some(LibraryGuiAction::SaveProgramToFile { editor: editor.clone() });
+                    },
+                    ProgramEditorAction::LoadFromFile => {
+                        return Some(LibraryGuiAction::LoadProgramFromFile);
                     },
                     ProgramEditorAction::None => {
                         // Do nothing
@@ -969,10 +1015,10 @@ impl LibraryGui {
                 self.draw_text(frame, "Enter: Confirm  •  Esc: Cancel", overlay_x + 20, overlay_y + 85, [180, 180, 180], false, window_width);
             },
             EditingMode::CreateProgram { name, editor } => {
-                editor.draw_program_editor(frame, "Create Program", "Arrow keys: Navigate | Backspace/Delete: Edit | ESC: Save & Exit");
+                editor.draw_program_editor(frame, "Create Program", "Arrow Keys: Navigate | Ctrl+Space: Load | Shift+Space: Save | ESC: Save & Exit");
             },
             EditingMode::EditProgram { name, source: _, editor } => {
-                editor.draw_program_editor(frame, &format!("Edit Program: {}", name), "Arrow keys: Navigate | Backspace/Delete: Edit | ESC: Save & Exit");
+                editor.draw_program_editor(frame, &format!("Edit Program: {}", name), "Arrow Keys: Navigate | Ctrl+Space: Load | Shift+Space: Save | ESC: Save & Exit");
             },
         }
     }

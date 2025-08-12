@@ -223,6 +223,12 @@ impl SquareContextMenu {
                     ProgramEditorAction::CloseWithoutSaving => {
                         self.state = SquareMenuState::SquareMenu { square_x, square_y, selected_option: 0 };
                     }
+                    ProgramEditorAction::SaveToFile => {
+                        return Some(SquareMenuAction::SaveProgramToFile);
+                    }
+                    ProgramEditorAction::LoadFromFile => {
+                        return Some(SquareMenuAction::LoadProgramFromFile);
+                    }
                     ProgramEditorAction::Continue => {
                         // Continue editing
                     }
@@ -278,7 +284,7 @@ impl SquareContextMenu {
                 self.draw_square_menu(frame, square_x, square_y, selected_option);
             }
             SquareMenuState::ProgramEditor { square_x, square_y, cursor_line: _, cursor_col: _ } => {
-                self.program_editor.draw_program_editor(frame, &format!("Programming Square ({}, {})", square_x, square_y), "Arrow keys: Navigate | Backspace/Delete: Edit | ESC: Save & Exit");
+                self.program_editor.draw_program_editor(frame, &format!("Programming Square ({}, {})", square_x, square_y), "Arrow Keys: Navigate | Ctrl+Space: Load | Shift+Space: Save | ESC: Save & Exit");
             }
 
             SquareMenuState::None => {}
@@ -316,6 +322,8 @@ pub enum SquareMenuAction {
     SaveProgram { square_x: usize, square_y: usize, program: Program, program_index: Option<usize> },
     SaveMultiplePrograms { square_x: usize, square_y: usize, programs: Vec<Program>, program_index: Option<usize> },
     ClearPrograms { square_x: usize, square_y: usize },
+    SaveProgramToFile,
+    LoadProgramFromFile,
 }
 
 // Helper functions for drawing (similar to context_menu.rs)

@@ -11,6 +11,7 @@ pub struct ProgramEditor {
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub parser: SimpleProgramParser,
+    pub scroll_offset: usize,
     // Key repeat timing
     last_key_repeat: Option<Instant>,
     key_repeat_delay: Duration,
@@ -22,6 +23,8 @@ pub enum ProgramEditorAction {
     SaveProgram(Program),
     SaveAndCompile,
     CloseWithoutSaving,
+    SaveToFile,
+    LoadFromFile,
     Continue,
     None,
 }
@@ -36,6 +39,7 @@ impl ProgramEditor {
             cursor_line: 0,
             cursor_col: "def my_program".len(), // Position cursor at end of first line
             parser: SimpleProgramParser::new(),
+            scroll_offset: 0,
             last_key_repeat: None,
             key_repeat_delay: Duration::from_millis(500),
             key_repeat_rate: Duration::from_millis(100), // Slower to prevent double deletions
@@ -61,6 +65,7 @@ impl ProgramEditor {
             cursor_line: 0,
             cursor_col: "def my_program".len(), // Position cursor at end of first line
             parser: SimpleProgramParser::new(),
+            scroll_offset: 0,
             last_key_repeat: None,
             key_repeat_delay: Duration::from_millis(500),
             key_repeat_rate: Duration::from_millis(100),
@@ -73,6 +78,7 @@ impl ProgramEditor {
             cursor_line: 0,
             cursor_col: 0,
             parser: SimpleProgramParser::new(),
+            scroll_offset: 0,
             last_key_repeat: None,
             key_repeat_delay: Duration::from_millis(500),
             key_repeat_rate: Duration::from_millis(100),
@@ -149,7 +155,28 @@ impl ProgramEditor {
         self.program_text.clone()
     }
 
+    /// Extract the program name from the first "def" line for use in file dialogs
+    pub fn get_program_name(&self) -> String {
+        for line in &self.program_text {
+            let trimmed = line.trim();
+            if trimmed.starts_with("def ") {
+                let name = trimmed.strip_prefix("def ").unwrap_or("my_program").trim();
+                // Remove any invalid filename characters
+                return name.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect::<String>()
+                    .trim_matches('_')
+                    .to_string();
+            }
+        }
+        "my_program".to_string()
+    }
+
     pub fn handle_input(&mut self, input: &winit_input_helper::WinitInputHelper) -> ProgramEditorAction {
+        self.handle_input_with_context(input, false)
+    }
+
+    pub fn handle_input_with_context(&mut self, input: &winit_input_helper::WinitInputHelper, from_library: bool) -> ProgramEditorAction {
         // Handle Escape key - save and compile
         if input.key_pressed(VirtualKeyCode::Escape) {
             return ProgramEditorAction::SaveAndCompile;
@@ -158,6 +185,14 @@ impl ProgramEditor {
         // Handle Ctrl+Q - close without saving
         if input.held_control() && input.key_pressed(VirtualKeyCode::Q) {
             return ProgramEditorAction::CloseWithoutSaving;
+        }
+
+        // Handle file operations
+        if input.held_shift() && input.key_pressed(VirtualKeyCode::Space) {
+            return ProgramEditorAction::SaveToFile;
+        }
+        if input.held_control() && input.key_pressed(VirtualKeyCode::Space) {
+            return ProgramEditorAction::LoadFromFile;
         }
 
         // Handle clipboard operations
@@ -219,6 +254,9 @@ impl ProgramEditor {
             }
         }
 
+        // Update scroll offset to keep cursor visible
+        self.update_scroll_offset();
+
         // Text editing
         if input.key_pressed(VirtualKeyCode::Return) {
             // Split current line at cursor position
@@ -228,6 +266,7 @@ impl ProgramEditor {
             self.program_text.insert(self.cursor_line + 1, right.to_string());
             self.cursor_line += 1;
             self.cursor_col = 0;
+            self.update_scroll_offset();
         }
 
         if self.should_handle_key_repeat(input, VirtualKeyCode::Back) {
@@ -273,12 +312,12 @@ impl ProgramEditor {
         }
 
         // Character input
-        self.handle_character_input(input);
+        self.handle_character_input(input, from_library);
 
         ProgramEditorAction::Continue
     }
 
-    fn handle_character_input(&mut self, input: &winit_input_helper::WinitInputHelper) {
+    fn handle_character_input(&mut self, input: &winit_input_helper::WinitInputHelper, from_library: bool) {
         let shift_pressed = input.held_shift();
         
         // Handle letter keys
@@ -420,6 +459,20 @@ impl ProgramEditor {
         }
     }
 
+    fn update_scroll_offset(&mut self) {
+        const VISIBLE_LINES: usize = 19; // Maximum visible lines before scrolling
+        
+        // Scroll down if cursor is below visible area
+        if self.cursor_line >= self.scroll_offset + VISIBLE_LINES {
+            self.scroll_offset = self.cursor_line - VISIBLE_LINES + 1;
+        }
+        
+        // Scroll up if cursor is above visible area
+        if self.cursor_line < self.scroll_offset {
+            self.scroll_offset = self.cursor_line;
+        }
+    }
+
     pub fn draw_syntax_highlighted_text(&self, frame: &mut [u8], text: &str, x: usize, y: usize) {
         font::draw_syntax_highlighted_text(frame, text, x, y, 640);
     }
@@ -456,12 +509,20 @@ impl ProgramEditor {
 
         // Draw program text with line numbers and cursor
         let text_start_x = menu_x + line_num_width + 10;
-        for (i, line) in self.program_text.iter().enumerate() {
-            let y_pos = menu_y + 50 + i * 18;
-            let is_cursor_line = i == self.cursor_line;
+        const VISIBLE_LINES: usize = 19;
+        
+        for display_line in 0..VISIBLE_LINES {
+            let actual_line = self.scroll_offset + display_line;
+            if actual_line >= self.program_text.len() {
+                break;
+            }
+            
+            let line = &self.program_text[actual_line];
+            let y_pos = menu_y + 50 + display_line * 18;
+            let is_cursor_line = actual_line == self.cursor_line;
             
             // Draw line number
-            let line_num = format!("{:2}", i + 1);
+            let line_num = format!("{:2}", actual_line + 1);
             let line_num_color = if is_cursor_line { [255, 255, 100] } else { [120, 120, 120] };
             font::draw_text(frame, &line_num, menu_x + 8, y_pos, line_num_color, false, 640);
             
@@ -521,54 +582,7 @@ impl ProgramEditor {
             }
         }
 
-        // Draw help panel
-        let help_y = menu_y + 50 + self.program_text.len() * 18 + 25;
-        let help_panel_height = 180;
-        
-        // Draw help panel background
-        for y in help_y..(help_y + help_panel_height) {
-            for x in (menu_x + 5)..(menu_x + menu_width - 5) {
-                if x < 640 && y < 480 {
-                    let pixel_index = (y * 640 + x) * 4;
-                    if pixel_index + 3 < frame.len() {
-                        frame[pixel_index] = 25;     // R
-                        frame[pixel_index + 1] = 25; // G
-                        frame[pixel_index + 2] = 35; // B
-                        frame[pixel_index + 3] = 255; // A
-                    }
-                }
-            }
-        }
-        
-        // Draw help content
-        font::draw_text(frame, "Quick Reference - Programming Language:", menu_x + 10, help_y + 5, [200, 200, 255], false, 640);
-         
-         // Function definition
-         font::draw_text(frame, "def function_name", menu_x + 15, help_y + 25, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Define a new function", menu_x + 150, help_y + 25, [150, 150, 150], false, 640);
-         
-         // Conditionals
-         font::draw_text(frame, "if c_red hits self N times", menu_x + 15, help_y + 45, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Collision detection", menu_x + 200, help_y + 45, [150, 150, 150], false, 640);
-         
-         // Actions
-         font::draw_text(frame, "set speed/direction value", menu_x + 15, help_y + 65, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Modify movement", menu_x + 180, help_y + 65, [150, 150, 150], false, 640);
-         
-         // Control flow
-         font::draw_text(frame, "and", menu_x + 15, help_y + 85, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Chain instructions", menu_x + 50, help_y + 85, [150, 150, 150], false, 640);
-         
-         font::draw_text(frame, "then", menu_x + 15, help_y + 105, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Continue to next function", menu_x + 60, help_y + 105, [150, 150, 150], false, 640);
-         
-         // Creation
-         font::draw_text(frame, "create square(x, y) with def...", menu_x + 15, help_y + 125, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Create programmed square", menu_x + 200, help_y + 125, [150, 150, 150], false, 640);
-         
-         // End
-         font::draw_text(frame, "end", menu_x + 15, help_y + 145, [100, 200, 255], false, 640);
-         font::draw_text(frame, "  Close function definition", menu_x + 50, help_y + 145, [150, 150, 150], false, 640);
+        // Only draw status info at the bottom
          
          // Status info
          let status_text = format!("Line: {} | Column: {} | Lines: {}", self.cursor_line + 1, self.cursor_col + 1, self.program_text.len());
