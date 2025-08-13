@@ -81,6 +81,7 @@ pub enum LibraryGuiAction {
     LoadAutoSample,
     SaveProgramToFile { editor: ProgramEditor },
     LoadProgramFromFile,
+    OpenAudioPlayer { library_name: String, sample_name: String },
 }
 
 const LIBRARY_GUI_WIDTH: usize = 580;
@@ -280,17 +281,44 @@ impl LibraryGui {
             }
         }
 
-        if input.key_pressed(VirtualKeyCode::Return) { // Open program
-            if matches!(selected_column, LibraryColumn::Programs) {
-                let all_programs = self.collect_all_programs(library_manager, grid);
-                if let Some(program_entry) = all_programs.get(selected_item) {
-                    // For both square and library programs, use the editing mode
-                    let script = self.program_to_source_code(&program_entry.program);
-                    editing_mode = Some(EditingMode::EditProgram {
-                        name: program_entry.name.clone(),
-                        source: program_entry.source.clone(),
-                        editor: ProgramEditor::new_with_text(script),
-                    });
+        if input.key_pressed(VirtualKeyCode::Return) { // Open program or audio player
+            match selected_column {
+                LibraryColumn::Programs => {
+                    let all_programs = self.collect_all_programs(library_manager, grid);
+                    if let Some(program_entry) = all_programs.get(selected_item) {
+                        // For both square and library programs, use the editing mode
+                        let script = self.program_to_source_code(&program_entry.program);
+                        editing_mode = Some(EditingMode::EditProgram {
+                            name: program_entry.name.clone(),
+                            source: program_entry.source.clone(),
+                            editor: ProgramEditor::new_with_text(script),
+                        });
+                    }
+                }
+                LibraryColumn::Samples => {
+                    // Open audio player for .wav files
+                    let all_samples = self.collect_all_samples(library_manager, &selected_library);
+                    if let Some(sample_entry) = all_samples.get(selected_item) {
+                        // Check if the original name (without suffix) ends with .wav
+                        let original_name = if sample_entry.name.contains(" (") {
+                            sample_entry.name.split(" (").next().unwrap_or(&sample_entry.name)
+                        } else {
+                            &sample_entry.name
+                        };
+                        
+                        if original_name.ends_with(".wav") {
+                            // Use the correct library name based on the sample source
+                            let library_name = match &sample_entry.source {
+                                SampleSource::Auto => "auto".to_string(),
+                                SampleSource::Library { library_name } => library_name.clone(),
+                            };
+                            
+                            result = Some(LibraryGuiAction::OpenAudioPlayer {
+                                library_name,
+                                sample_name: original_name.to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }

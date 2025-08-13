@@ -15,6 +15,7 @@ use crate::audio_engine::AudioEngine;
 use crate::library_gui::{LibraryGui, LibraryGuiAction};
 use crate::sample_manager::SampleManager;
 use crate::ball_audio::BallAudioSystem;
+use crate::audio_player::{AudioPlayer, AudioPlayerAction};
 use crate::font;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -97,6 +98,7 @@ pub struct SequencerGrid {
     pub library_manager: LibraryManager,
     pub library_gui: LibraryGui,
     pub sample_manager: SampleManager,
+    pub audio_player: AudioPlayer,
     // State tracking for reset functionality
     pub original_cells: [[Cell; GRID_WIDTH]; GRID_HEIGHT],
     pub original_balls: Vec<Ball>,
@@ -122,6 +124,7 @@ impl SequencerGrid {
             library_manager: LibraryManager::new(),
             library_gui: LibraryGui::new(),
             sample_manager,
+            audio_player: AudioPlayer::new(),
             // Initialize original state
             original_cells: initial_cells,
             original_balls: Vec::new(),
@@ -291,7 +294,20 @@ impl SequencerGrid {
     pub fn reset_to_original_state(&mut self) {
         // Restore grid to original state
         self.cells = self.original_cells.clone();
+        
+        // Preserve sample paths when restoring balls
+        let current_sample_paths: Vec<Option<String>> = self.balls.iter()
+            .map(|ball| ball.sample_path.clone())
+            .collect();
+        
         self.balls = self.original_balls.clone();
+        
+        // Restore the sample paths
+        for (i, sample_path) in current_sample_paths.into_iter().enumerate() {
+            if i < self.balls.len() {
+                self.balls[i].sample_path = sample_path;
+            }
+        }
         
         // Reset all balls to their original positions and stop them
         for ball in &mut self.balls {
@@ -725,6 +741,13 @@ impl SequencerGrid {
                             all_log_messages.push(format!("Square ({},{}) hit count incremented to: {}", grid_x, grid_y, new_hit_count));
                             
                             let square_program = &self.cells[grid_y][grid_x].program;
+                            // Debug: Show what programs are available on this square
+                            all_log_messages.push(format!("Square ({},{}) has {} programs, active: {:?}", 
+                                grid_x, grid_y, square_program.programs.len(), square_program.active_program));
+                            for (i, prog) in square_program.programs.iter().enumerate() {
+                                all_log_messages.push(format!("  Program {}: '{}' with {} instructions", i, prog.name, prog.instructions.len()));
+                            }
+                            
                             if !square_program.programs.is_empty() {
                                 if let Some(active_program_index) = square_program.active_program {
                                     if let Some(program) = square_program.programs.get(active_program_index) {
@@ -1161,21 +1184,110 @@ impl SequencerGrid {
                                                         all_log_messages.push(format!("    Invalid library function format: {} (expected library.function)", library_function));
                                                     }
                                                 }
+                                                ProgramAction::SetSliceArray { x, y, markers } => {
+                                                    all_log_messages.push(format!("  → SetSliceArray at ({}, {}) with {} markers", x, y, markers.len()));
+                                                    
+                                                    // Only set up the slice array if it doesn't already exist
+                                                    if !self.program_executor.state.slice_arrays.contains_key(&(x, y)) {
+                                                        // Store the slice array in the program executor state
+                                                        self.program_executor.state.slice_arrays.insert((x, y), markers.clone());
+                                                        // Initialize the hit index to 0 for first time setup
+                                                        self.program_executor.state.slice_hit_indices.insert((x, y), 0);
+                                                        all_log_messages.push("    Slice array initialized".to_string());
+                                                    } else {
+                                                        all_log_messages.push("    Slice array already exists, skipping setup".to_string());
+                                                    }
+                                                }
+                                                ProgramAction::PlaySliceMarker { x, y, marker_index } => {
+                                                    all_log_messages.push(format!("  → PlaySliceMarker at ({}, {}) marker {}", x, y, marker_index));
+                                                    // Get the current slice array for this square
+                                                    if let Some(slice_array) = self.program_executor.state.slice_arrays.get(&(x, y)) {
+                                                        let current_index = self.program_executor.state.slice_hit_indices.get(&(x, y)).unwrap_or(&0);
+                                                        if *current_index < slice_array.len() {
+                                                            let marker_to_play = slice_array[*current_index];
+                                                            all_log_messages.push(format!("    Playing marker {} from slice array (index {})", marker_to_play, current_index));
+                                                            
+                                                            // Try to get markers from audio player first, then from saved markers
+                                                            let mut marker_found = false;
+                                                            if let Some(markers) = self.audio_player.get_markers() {
+                                                                // Look for marker by extracting number from "Marker_X" format or by position index
+                                                                let marker = markers.iter().find(|m| {
+                                                                    // Try to extract number from "Marker_X" format
+                                                                    if m.name.starts_with("Marker_") {
+                                                                        if let Ok(marker_num) = m.name[7..].parse::<u32>() {
+                                                                            return marker_num == marker_to_play;
+                                                                        }
+                                                                    }
+                                                                    // Fallback: try parsing the entire name as a number
+                                                                    m.name.parse::<u32>().unwrap_or(0) == marker_to_play
+                                                                });
+                                                                
+                                                                if let Some(marker) = marker {
+                                                                    // Play the marker using the audio engine
+                                                                    if let Some(sample_path) = self.audio_player.get_sample_info().map(|(path, _, _, _)| path) {
+                                                                        if let Err(e) = self.audio_engine.play_on_channel_with_position(0, sample_path, 1.0, 1.0, marker.position) {
+                                                                            all_log_messages.push(format!("    Error playing marker: {}", e));
+                                                                        }
+                                                                        marker_found = true;
+                                                                    }
+                                                                }
+                                                            }
+                                                            
+                                                            // If not found in current markers, search saved markers
+                                                            if !marker_found {
+                                                                for (sample_path, saved_markers) in self.audio_player.get_all_saved_markers() {
+                                                                    // Look for marker by extracting number from "Marker_X" format or by position index
+                                                                    let marker = saved_markers.iter().find(|m| {
+                                                                        // Try to extract number from "Marker_X" format
+                                                                        if m.name.starts_with("Marker_") {
+                                                                            if let Ok(marker_num) = m.name[7..].parse::<u32>() {
+                                                                                return marker_num == marker_to_play;
+                                                                            }
+                                                                        }
+                                                                        // Fallback: try parsing the entire name as a number
+                                                                        m.name.parse::<u32>().unwrap_or(0) == marker_to_play
+                                                                    });
+                                                                    
+                                                                    if let Some(marker) = marker {
+                                                                        if let Err(e) = self.audio_engine.play_on_channel_with_position(0, &sample_path, 1.0, 1.0, marker.position) {
+                                                                            all_log_messages.push(format!("    Error playing saved marker: {}", e));
+                                                                        }
+                                                                        marker_found = true;
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                            
+                                                            if !marker_found {
+                                                                all_log_messages.push(format!("    Marker {} not found in current or saved markers", marker_to_play));
+                                                            }
+                                                            
+                                                            // Increment the hit index for next time
+                                            let next_index = (*current_index + 1) % slice_array.len();
+                                            self.program_executor.state.slice_hit_indices.insert((x, y), next_index);
+                                                        }
+                                                    }
+                                                }
                                                 _ => {
                                                     all_log_messages.push("  → Unknown action".to_string());
                                                 } // Handle other actions as needed
                                             }
                                         }
                                         
-                                        // Play ball's audio sample after processing actions using centralized audio system
-                                        if let Err(e) = self.ball_audio_system.play_collision_audio(
-                                            &self.audio_engine,
-                                            ball,
-                                            collision_pitch,
-                                            &mut all_log_messages,
-                                        ) {
-                                            all_log_messages.push(format!("Ball audio system error: {}", e));
-                                        }
+                                        // Only play ball's audio if there's no slice array active for this square
+                        let has_slice_array = self.program_executor.state.slice_arrays.contains_key(&(grid_x, grid_y));
+                        if !has_slice_array {
+                            if let Err(e) = self.ball_audio_system.play_collision_audio(
+                                &self.audio_engine,
+                                ball,
+                                collision_pitch,
+                                &mut all_log_messages,
+                            ) {
+                                all_log_messages.push(format!("Ball audio system error: {}", e));
+                            }
+                        } else {
+                            all_log_messages.push("Skipping regular ball audio - slice array active".to_string());
+                        }
                                         
                                         // Always bounce off squares unless an explicit bounce was already performed
                                         if !explicit_bounce {
@@ -1196,6 +1308,104 @@ impl SequencerGrid {
                                             ball.y = old_y;
                                             ball.last_grid_x = old_x.floor() as usize;
                                             ball.last_grid_y = old_y.floor() as usize;
+                                        }
+                                        
+                                        // Check for slice arrays and play next marker in sequence
+                                        if let Some(slice_array) = self.program_executor.state.slice_arrays.get(&(grid_x, grid_y)) {
+                                            let current_index = self.program_executor.state.slice_hit_indices.get(&(grid_x, grid_y)).unwrap_or(&0);
+                                            if *current_index < slice_array.len() {
+                                                let marker_to_play = slice_array[*current_index];
+                                                all_log_messages.push(format!("  → Slice Array: Playing marker {} (index {} of {})", marker_to_play, current_index, slice_array.len()));
+                                                
+                                                // Use the ball's sample path for slice array playback
+                                                if let Some(ball_sample_path) = &ball.sample_path {
+                                                    all_log_messages.push(format!("    Looking for markers for ball sample: {}", ball_sample_path));
+                                                    
+                                                    // First check if the ball's sample has markers in the audio player (if it's currently open)
+                                                    let markers_and_path = if let Some(markers) = self.audio_player.get_markers() {
+                                                        if let Some(current_sample_path) = self.audio_player.get_sample_info().map(|(path, _, _, _)| path) {
+                                                            all_log_messages.push(format!("    Audio player has sample: {} (looking for: {})", current_sample_path, ball_sample_path));
+                                                            if current_sample_path == ball_sample_path {
+                                                                all_log_messages.push(format!("    Found {} markers in audio player", markers.len()));
+                                                                Some((markers, ball_sample_path.clone()))
+                                                            } else {
+                                                                all_log_messages.push("    Audio player sample doesn't match ball sample".to_string());
+                                                                None
+                                                            }
+                                                        } else {
+                                                            all_log_messages.push("    No sample info in audio player".to_string());
+                                                            None
+                                                        }
+                                                    } else {
+                                                        all_log_messages.push("    No markers in audio player".to_string());
+                                                        None
+                                                    };
+                                                    
+                                                    // If not found in current audio player, check saved markers for the ball's sample
+                                                    let markers_and_path = markers_and_path.or_else(|| {
+                                                        if let Some(saved_markers) = self.audio_player.get_saved_markers(ball_sample_path) {
+                                                            all_log_messages.push(format!("    Found {} saved markers for ball sample", saved_markers.len()));
+                                                            Some((saved_markers, ball_sample_path.clone()))
+                                                        } else {
+                                                            all_log_messages.push("    No saved markers for ball sample".to_string());
+                                                            None
+                                                        }
+                                                    });
+                                                    
+                                                    if let Some((markers, sample_path)) = markers_and_path {
+                                                        // Look for marker by extracting number from "Marker_X" format or by position index
+                                                        let marker = markers.iter().find(|m| {
+                                                            // Try to extract number from "Marker_X" format
+                                                            if m.name.starts_with("Marker_") {
+                                                                if let Ok(marker_num) = m.name[7..].parse::<u32>() {
+                                                                    return marker_num == marker_to_play;
+                                                                }
+                                                            }
+                                                            // Fallback: try parsing the entire name as a number
+                                                            m.name.parse::<u32>().unwrap_or(0) == marker_to_play
+                                                        });
+                                                        
+                                                        if let Some(marker) = marker {
+                                            all_log_messages.push(format!("    Found marker '{}' at position {}", marker.name, marker.position));
+                                            
+                                            // Find the next marker chronologically for end position
+                            let end_position = {
+                                // Find the next marker chronologically after the current marker
+                                let mut sorted_markers: Vec<_> = markers.iter().collect();
+                                sorted_markers.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
+                                
+                                let next_chronological = sorted_markers.iter()
+                                    .find(|m| m.position > marker.position)
+                                    .map(|m| m.position);
+                                    
+                                next_chronological.unwrap_or(1.0) // Play to end if no next marker
+                            };
+                                            
+                                            all_log_messages.push(format!("    Playing segment from {} to {:?}", marker.position, end_position));
+                            
+                            // Create a dedicated channel for this segment to avoid conflicts
+                            let segment_channel = self.audio_engine.create_channel(format!("Segment_{}_{}", grid_x, grid_y));
+                            
+                            // Play the marker segment using the dedicated channel
+                            if let Err(e) = self.audio_engine.play_on_channel_with_segment(segment_channel, &sample_path, 1.0, 1.0, marker.position, Some(end_position)) {
+                                all_log_messages.push(format!("    Error playing slice marker: {}", e));
+                            } else {
+                                all_log_messages.push("    Successfully started segment playback".to_string());
+                            }
+                                            
+                                            // Increment the hit index for next time
+                                            let next_index = (*current_index + 1) % slice_array.len();
+                                            self.program_executor.state.slice_hit_indices.insert((grid_x, grid_y), next_index);
+                                        } else {
+                                            all_log_messages.push(format!("    Marker {} not found in ball sample markers", marker_to_play));
+                                        }
+                                                    } else {
+                                                        all_log_messages.push(format!("    No markers available for ball sample: {}", ball_sample_path));
+                                                    }
+                                                } else {
+                                                    all_log_messages.push("    Ball has no sample path for slice array playback".to_string());
+                                                }
+                                            }
                                         }
                                         
                                         // Update cooldown tracking
@@ -1467,6 +1677,11 @@ impl SequencerGrid {
         
         triggered_positions
     }
+    
+    pub fn update(&mut self, delta_time: f32) {
+        // Update audio player
+        self.audio_player.update(delta_time, &self.audio_engine);
+    }
 }
 
 pub struct SequencerUI {
@@ -1630,8 +1845,8 @@ impl SequencerUI {
                 }
             }
             
-            // Handle library GUI input if visible
-            if self.grid.library_gui.is_visible() {
+            // Handle library GUI input if visible and audio player is not open
+            if self.grid.library_gui.is_visible() && !self.grid.audio_player.is_visible() {
                 if let Some(action) = self.grid.library_gui.handle_input(&self.input, &self.grid.library_manager, &self.grid.cells) {
                     match action {
                         LibraryGuiAction::RenameItem { library_name, old_name, new_name, is_sample } => {
@@ -1762,12 +1977,46 @@ impl SequencerUI {
                         LibraryGuiAction::LoadProgramFromFile => {
                             self.load_program_from_file();
                         }
-                    }
-                }
+                        LibraryGuiAction::OpenAudioPlayer { library_name, sample_name } => {
+                            // Get the sample from the library
+                            if let Some(lib) = self.grid.library_manager.sample_libraries.get(&library_name) {
+                                if let Some(_sample) = lib.samples.get(&sample_name) {
+                                    // Construct the file path using the sample manager
+                                    let sample_path = self.grid.sample_manager.get_local_path(&sample_name);
+                                    
+                                    // Open the audio player with the sample
+                                    if let Err(e) = self.grid.audio_player.open_sample(sample_path.clone(), &mut self.grid.audio_engine) {
+                                        self.grid.log_to_console(format!("Failed to open audio player: {}", e));
+                                    } else {
+                                        self.grid.log_to_console(format!("Opened audio player for {}", sample_name));
+                                    }
+                                }
+                            }
+                        }
+                    }}
                 return; // Don't process other input while library GUI is open
             }
             
-            // Normal grid navigation (only when library GUI is not open)
+            // Handle audio player input if visible
+            if self.grid.audio_player.is_visible() {
+                if let Some(action) = self.grid.audio_player.handle_input(&self.input, &mut self.grid.audio_engine) {
+                    match action {
+                        AudioPlayerAction::Close => {
+                            self.grid.audio_player.close();
+                            self.grid.log_to_console("Audio player closed".to_string());
+                        }
+                        AudioPlayerAction::SaveSlice { start, end, name } => {
+                            self.grid.log_to_console(format!("Saved audio slice from {:.2} to {:.2} as {}", start, end, name));
+                        }
+                        AudioPlayerAction::ExportMarkers => {
+                            self.grid.log_to_console("Exported audio markers".to_string());
+                        }
+                    }
+                }
+                return; // Block all other input while audio player is open
+            }
+            
+            // Normal grid navigation (only when library GUI and audio player are not open)
             if self.input.key_pressed(VirtualKeyCode::Up) {
                 self.grid.cursor.move_up();
             }
@@ -1972,6 +2221,9 @@ impl SequencerUI {
         // Update balls with delta time
         let triggered_positions = self.grid.update_balls(delta_time);
         
+        // Update grid (including audio player)
+        self.grid.update(delta_time);
+        
         // Play audio samples for triggered positions
         for (_x, _y, ball_index) in triggered_positions {
             if let Some(ball) = self.grid.balls.get(ball_index) {
@@ -2036,9 +2288,6 @@ impl SequencerUI {
             Self::draw_ball_static(frame, ball.x, ball.y, ball_color);
         }
         
-        // Draw cursor
-        Self::draw_cursor_static(frame, self.grid.cursor.x, self.grid.cursor.y);
-        
         // Draw context menu if open
         self.grid.context_menu.render(frame, &self.grid.balls);
         
@@ -2047,6 +2296,14 @@ impl SequencerUI {
         
         // Draw library GUI if visible
         self.grid.library_gui.render(frame, &self.grid.library_manager, &self.grid.cells, WINDOW_WIDTH, WINDOW_HEIGHT);
+        
+        // Draw audio player if visible
+        self.grid.audio_player.render(frame, WINDOW_WIDTH, WINDOW_HEIGHT);
+        
+        // Draw cursor only when library GUI, audio player, and square menu are not visible
+        if !self.grid.library_gui.is_visible() && !self.grid.audio_player.is_visible() && !self.grid.square_menu.is_open() {
+            Self::draw_cursor_static(frame, self.grid.cursor.x, self.grid.cursor.y);
+        }
         
         // Draw console area
         Self::draw_console_static(frame, &self.grid.console_messages);

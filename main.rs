@@ -11,6 +11,7 @@ mod library_gui;
 mod program_editor;
 mod font;
 mod sample_manager;
+mod audio_player;
 
 use audio_engine::AudioEngine;
 use sequencer::run_sequencer;

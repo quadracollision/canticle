@@ -9,6 +9,8 @@ pub struct ProgrammerState {
     pub ball_hit_counts: HashMap<String, u32>, // Track hits per ball color (global)
     pub square_hit_counts: HashMap<(usize, usize), u32>, // Track hits per square position
     pub ball_color_square_hits: HashMap<(String, usize, usize), u32>, // Track hits per ball color per square
+    pub slice_arrays: HashMap<(usize, usize), Vec<u32>>, // Track slice arrays per square position
+    pub slice_hit_indices: HashMap<(usize, usize), usize>, // Track current index in slice array per square
 }
 
 impl Default for ProgrammerState {
@@ -18,6 +20,8 @@ impl Default for ProgrammerState {
             ball_hit_counts: HashMap::new(),
             square_hit_counts: HashMap::new(),
             ball_color_square_hits: HashMap::new(),
+            slice_arrays: HashMap::new(),
+            slice_hit_indices: HashMap::new(),
         }
     }
 }
@@ -435,6 +439,11 @@ impl SimpleProgramParser {
         // Handle "destroy" statements
         if line.starts_with("destroy ") {
             return self.parse_destroy_statement(line);
+        }
+        
+        // Handle "slice" statements
+        if line.starts_with("slice ") {
+            return self.parse_slice_statement(line);
         }
         
         // Handle library function calls
@@ -1098,6 +1107,31 @@ impl SimpleProgramParser {
         
         Err(format!("Invalid hits() target: {}", target))
     }
+    
+    fn parse_slice_statement(&self, line: &str) -> Result<Instruction, String> {
+        // Parse "slice 1 4 2 5" format
+        let content = &line[6..].trim(); // Remove "slice "
+        
+        if content.is_empty() {
+            return Err("Slice statement cannot be empty. Expected: slice 1 4 2 5".to_string());
+        }
+        
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        let mut markers = Vec::new();
+        
+        for part in parts {
+            match part.parse::<u32>() {
+                Ok(marker_num) => markers.push(marker_num),
+                Err(_) => return Err(format!("Invalid marker number '{}' in slice statement", part)),
+            }
+        }
+        
+        if markers.is_empty() {
+            return Err("Slice statement must contain at least one marker number".to_string());
+        }
+        
+        Ok(Instruction::SetSliceArray { markers })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1398,6 +1432,13 @@ impl ProgramExecutor {
                     };
                     println!("DEBUG: Final display text: {}", display_text);
                     actions.push(ProgramAction::Print(display_text));
+                }
+                Instruction::SetSliceArray { markers } => {
+                    actions.push(ProgramAction::SetSliceArray {
+                        x: context.square_x,
+                        y: context.square_y,
+                        markers: markers.clone(),
+                    });
                 }
                 Instruction::End => {
                     actions.push(ProgramAction::End);

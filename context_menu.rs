@@ -531,8 +531,8 @@ fn draw_color_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_opti
 }
 
 fn draw_relative_speed_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_ball: usize, speed_ratio: f32, balls: &[Ball]) {
-    let menu_width = 280;
-    let menu_height = 180;
+    let menu_width = 250;
+    let menu_height = 120;
     
     // Position menu to the right of the ball, but keep it on screen
     let mut menu_x = ball_x * CELL_SIZE + CELL_SIZE;
@@ -549,133 +549,35 @@ fn draw_relative_speed_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, sele
     draw_menu_background(frame, menu_x, menu_y, menu_width, menu_height);
     draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
     
-    // Title with icon
-    draw_text(frame, "⚡ Relative Speed", menu_x + 10, menu_y + 10, [255, 255, 255], false);
+    // Title
+    draw_text(frame, "Relative Speed:", menu_x + 10, menu_y + 10, [255, 255, 255], false);
     
-    // Reference ball section with visual indicator
-    let ref_y = menu_y + 35;
-    draw_text(frame, "Reference Ball:", menu_x + 10, ref_y, [200, 200, 200], false);
-    
-    if let Some(ref_ball) = balls.get(selected_ball) {
-        // Draw reference ball indicator
-        let ball_indicator_x = menu_x + 10;
-        let ball_indicator_y = ref_y + 20;
-        let ball_color = get_color_rgb(&ref_ball.color);
-        
-        // Draw small ball representation
-        for dy in 0..8 {
-            for dx in 0..8 {
-                let px = ball_indicator_x + dx;
-                let py = ball_indicator_y + dy;
-                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                    let distance_sq = (dx as f32 - 4.0).powi(2) + (dy as f32 - 4.0).powi(2);
-                    if distance_sq <= 16.0 {
-                        let idx = (py * WINDOW_WIDTH + px) * 4;
-                        if idx + 3 < frame.len() {
-                            frame[idx] = ball_color[0];
-                            frame[idx + 1] = ball_color[1];
-                            frame[idx + 2] = ball_color[2];
-                            frame[idx + 3] = 255;
-                        }
-                    }
-                }
-            }
-        }
-        
-        let ref_text = format!("Ball {} - {:.1} u/s", selected_ball, ref_ball.speed);
-        draw_text(frame, &ref_text, ball_indicator_x + 20, ball_indicator_y, [255, 255, 255], false);
+    // Reference ball selection
+    let reference_text = if let Some(ref_ball) = balls.get(selected_ball) {
+        format!("Reference: Ball {} ({:.1} u/s)", selected_ball, ref_ball.speed)
     } else {
-        draw_text(frame, "No ball selected", menu_x + 10, ref_y + 20, [255, 100, 100], false);
-    }
+        "Reference: No ball selected".to_string()
+    };
+    draw_text(frame, &reference_text, menu_x + 10, menu_y + 30, [200, 200, 200], false);
     
-    // Speed ratio section with visual slider
-    let ratio_y = menu_y + 80;
-    draw_text(frame, "Speed Multiplier:", menu_x + 10, ratio_y, [200, 200, 200], false);
-    
+    // Speed ratio display
     let ratio_index = RELATIVE_SPEED_RATIOS.iter().position(|&r| (r - speed_ratio).abs() < 0.001).unwrap_or(4);
     let ratio_label = RELATIVE_SPEED_LABELS.get(ratio_index).unwrap_or(&"1x");
+    let ratio_text = format!("Ratio: {}", ratio_label);
+    draw_text(frame, &ratio_text, menu_x + 10, menu_y + 50, [255, 255, 0], false);
     
-    // Draw ratio slider background
-    let slider_x = menu_x + 10;
-    let slider_y = ratio_y + 20;
-    let slider_width = 200;
-    let slider_height = 6;
-    
-    // Draw slider track
-    for y in slider_y..slider_y + slider_height {
-        for x in slider_x..slider_x + slider_width {
-            if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
-                let idx = (y * WINDOW_WIDTH + x) * 4;
-                if idx + 3 < frame.len() {
-                    frame[idx] = 60;
-                    frame[idx + 1] = 60;
-                    frame[idx + 2] = 60;
-                    frame[idx + 3] = 255;
-                }
-            }
-        }
-    }
-    
-    // Draw ratio markers
-    for (i, &ratio) in RELATIVE_SPEED_RATIOS.iter().enumerate() {
-        let marker_x = slider_x + (i * slider_width / (RELATIVE_SPEED_RATIOS.len() - 1));
-        let marker_color = if i == ratio_index { [255, 255, 0] } else { [150, 150, 150] };
-        let marker_size = if i == ratio_index { 8 } else { 4 };
-        
-        // Draw marker
-        for dy in 0..marker_size {
-            for dx in 0..marker_size {
-                let px = marker_x + dx - marker_size / 2;
-                let py = slider_y + dy - 2;
-                if px < WINDOW_WIDTH && py < WINDOW_HEIGHT {
-                    let idx = (py * WINDOW_WIDTH + px) * 4;
-                    if idx + 3 < frame.len() {
-                        frame[idx] = marker_color[0];
-                        frame[idx + 1] = marker_color[1];
-                        frame[idx + 2] = marker_color[2];
-                        frame[idx + 3] = 255;
-                    }
-                }
-            }
-        }
-    }
-    
-    // Current ratio display
-    let ratio_text = format!("× {}", ratio_label);
-    draw_text(frame, &ratio_text, menu_x + 220, ratio_y + 15, [255, 255, 0], false);
-    
-    // Result section with visual feedback
-    let result_y = menu_y + 115;
-    draw_text(frame, "Result Speed:", menu_x + 10, result_y, [200, 200, 200], false);
-    
+    // Calculated speed display
     if let Some(ref_ball) = balls.get(selected_ball) {
         let calculated_speed = ref_ball.speed * speed_ratio;
         let clamped_speed = calculated_speed.clamp(MIN_SPEED, MAX_SPEED);
-        let speed_text = format!("{:.1} u/s", clamped_speed);
-        
-        // Color coding for result
-        let result_color = if calculated_speed != clamped_speed {
-            [255, 100, 100] // Red if clamped
-        } else if speed_ratio > 1.0 {
-            [100, 255, 100] // Green if faster
-        } else if speed_ratio < 1.0 {
-            [100, 150, 255] // Blue if slower
-        } else {
-            [255, 255, 255] // White if same
-        };
-        
-        draw_text(frame, &speed_text, menu_x + 120, result_y, result_color, false);
-        
-        // Warning if clamped
-        if calculated_speed != clamped_speed {
-            draw_text(frame, "(clamped)", menu_x + 180, result_y, [255, 100, 100], false);
-        }
+        let speed_text = format!("Result: {:.1} u/s", clamped_speed);
+        let color = if calculated_speed != clamped_speed { [255, 100, 100] } else { [100, 255, 100] };
+        draw_text(frame, &speed_text, menu_x + 10, menu_y + 70, color, false);
     }
     
-    // Instructions with better formatting
-    let instr_y = menu_y + 145;
-    draw_text(frame, "↑↓ Reference Ball  ←→ Multiplier", menu_x + 10, instr_y, [180, 180, 180], false);
-    draw_text(frame, "Space: Apply  Esc: Back", menu_x + 10, instr_y + 15, [180, 180, 180], false);
+    // Instructions
+    draw_text(frame, "Up/Down: ball, Left/Right: ratio", menu_x + 10, menu_y + 90, [180, 180, 180], false);
+    draw_text(frame, "Space: apply, Esc: back", menu_x + 10, menu_y + 105, [180, 180, 180], false);
 }
 
 fn get_color_rgb(color_name: &str) -> [u8; 3] {

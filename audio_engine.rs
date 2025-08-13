@@ -51,22 +51,66 @@ struct Voice {
     channels: u16,
     active: bool,
     channel_id: u32,
+    end_position: Option<usize>, // Optional end position for segment playback
+    start_time: Option<std::time::Instant>,
+    start_position_samples: usize,
 }
 
 impl Voice {
     fn new(sample: &DecodedSample, volume: f32, pitch: f32, channel_id: u32) -> Self {
+        Self::new_with_position(sample, volume, pitch, channel_id, 0.0)
+    }
+    
+    fn new_with_position(sample: &DecodedSample, volume: f32, pitch: f32, channel_id: u32, start_position: f32) -> Self {
+        Self::new_with_segment(sample, volume, pitch, channel_id, start_position, None)
+    }
+    
+    fn new_with_segment(sample: &DecodedSample, volume: f32, pitch: f32, channel_id: u32, start_position: f32, end_position: Option<f32>) -> Self {
+        // Calculate the number of samples per frame (1 for mono, 2 for stereo)
+        let samples_per_frame = sample.channels as usize;
+        let total_frames = sample.data.len() / samples_per_frame;
+        
+        // Calculate start frame and convert to sample index
+        let start_frame = (start_position * total_frames as f32) as usize;
+        let start_sample = start_frame * samples_per_frame;
+        let clamped_position = start_sample.min(sample.data.len().saturating_sub(samples_per_frame));
+        
+        let end_sample = end_position.map(|end_pos| {
+            let end_frame = (end_pos * total_frames as f32) as usize;
+            let end_sample = end_frame * samples_per_frame;
+            // Ensure end position doesn't exceed sample length
+            end_sample.min(sample.data.len())
+        });
+        
+        // Debug logging for segment creation
+        if let Some(end_pos) = end_sample {
+            log::debug!("Creating segment: start_sample={}, end_sample={}, total_samples={}, duration_frames={}", 
+                       clamped_position, end_pos, sample.data.len(), end_pos - clamped_position);
+        }
+        
         Self {
             sample_data: sample.data.clone(),
-            position: 0,
+            position: clamped_position,
             volume,
             pitch,
             channels: sample.channels,
             active: true,
             channel_id,
+            end_position: end_sample,
+            start_time: Some(std::time::Instant::now()),
+            start_position_samples: clamped_position,
         }
     }
     
     fn get_next_sample(&mut self) -> (f32, f32) {
+        // Check if we've reached the end position for segment playback
+        if let Some(end_pos) = self.end_position {
+            if self.position >= end_pos {
+                self.active = false;
+                return (0.0, 0.0);
+            }
+        }
+        
         if !self.active || self.position >= self.sample_data.len() {
             self.active = false;
             return (0.0, 0.0);
@@ -79,9 +123,29 @@ impl Voice {
             left // Mono or end of data
         };
         
-        // Simple pitch shifting by changing playback speed
-        let step = (self.pitch * self.channels as f32) as usize;
-        self.position += step.max(self.channels as usize);
+        // Fixed: Use consistent stepping regardless of pitch for segment accuracy
+        // Pitch affects playback speed but shouldn't affect segment boundary precision
+        let base_step = self.channels as usize;
+        let pitch_step = if self.pitch != 1.0 {
+            // For non-unity pitch, still step by channel count but track fractional position
+            (self.pitch * base_step as f32) as usize
+        } else {
+            base_step
+        };
+        
+        // Ensure we don't step beyond the end position for segments
+        let next_position = self.position + pitch_step.max(base_step);
+        if let Some(end_pos) = self.end_position {
+            if next_position >= end_pos {
+                // If next step would exceed end, set position to end and mark inactive
+                self.position = end_pos;
+                self.active = false;
+            } else {
+                self.position = next_position;
+            }
+        } else {
+            self.position = next_position;
+        }
         
         (left, right)
     }
@@ -213,13 +277,9 @@ impl AudioEngine {
         let master_vol = *master_volume.lock().unwrap();
         
         if let Ok(mut voices_guard) = voices.try_lock() {
-            let mut active_count = 0;
-            
             // Mix all active voices
             for voice in voices_guard.iter_mut() {
                 if voice.active {
-                    active_count += 1;
-                    
                     // Process audio in stereo pairs
                     for chunk in data.chunks_mut(output_channels) {
                         let (left, right) = voice.get_next_sample();
@@ -487,7 +547,7 @@ impl AudioEngine {
                                      let channel_data = buf.chan(ch as usize);
                                      if frame < channel_data.len() {
                                          // Convert S24 to f32: S24 range is -8388608 to 8388607
-                                         let sample_value = channel_data[frame].into_i32();
+                                         let sample_value = channel_data[frame].inner();
                                          sample_data.push(sample_value as f32 / 8388608.0);
                                      }
                                  }
@@ -558,6 +618,21 @@ impl AudioEngine {
         Ok(())
     }
     
+    pub fn load_sample(&self, file_path: &str) -> Result<DecodedSample> {
+        let resolved_path = self.resolve_file_path(file_path);
+        
+        // Get sample from cache or load it
+        let mut cache = self.sample_cache.lock().unwrap();
+        if let Some(cached_sample) = cache.get(&resolved_path) {
+            Ok(cached_sample.clone())
+        } else {
+            // Load and cache the sample
+            let decoded_sample = Self::decode_audio_file(&resolved_path)?;
+            cache.insert(resolved_path.clone(), decoded_sample.clone());
+            Ok(decoded_sample)
+        }
+    }
+    
     pub fn play_on_channel(&self, channel_id: u32, file_path: &str) -> Result<()> {
         self.play_on_channel_with_pitch_and_volume(channel_id, file_path, 1.0, 1.0)
     }
@@ -567,6 +642,14 @@ impl AudioEngine {
     }
     
     pub fn play_on_channel_with_pitch_and_volume(&self, channel_id: u32, file_path: &str, pitch: f32, volume: f32) -> Result<()> {
+        self.play_on_channel_with_position(channel_id, file_path, pitch, volume, 0.0)
+    }
+    
+    pub fn play_on_channel_with_position(&self, channel_id: u32, file_path: &str, pitch: f32, volume: f32, start_position: f32) -> Result<()> {
+        self.play_on_channel_with_segment(channel_id, file_path, pitch, volume, start_position, None)
+    }
+    
+    pub fn play_on_channel_with_segment(&self, channel_id: u32, file_path: &str, pitch: f32, volume: f32, start_position: f32, end_position: Option<f32>) -> Result<()> {
         let resolved_path = self.resolve_file_path(file_path);
         
         // Get sample from cache or load it
@@ -593,8 +676,10 @@ impl AudioEngine {
         // Create and add voice
         let safe_pitch = pitch.clamp(0.1, 10.0);
         let safe_volume = volume.clamp(0.0, 2.0);
+        let safe_position = start_position.clamp(0.0, 1.0);
+        let safe_end_position = end_position.map(|end_pos| end_pos.clamp(0.0, 1.0));
         
-        let voice = Voice::new(&sample, safe_volume, safe_pitch, channel_id);
+        let voice = Voice::new_with_segment(&sample, safe_volume, safe_pitch, channel_id, safe_position, safe_end_position);
         
         {
             let mut voices = self.voices.lock().unwrap();
@@ -608,8 +693,13 @@ impl AudioEngine {
         
         self.active_voices.fetch_add(1, Ordering::Relaxed);
         
-        log::debug!("Playing sample {} on channel {} with pitch {:.2} and volume {:.2}", 
-                   file_path, channel_id, safe_pitch, safe_volume);
+        if let Some(end_pos) = safe_end_position {
+            log::debug!("Playing sample {} on channel {} with pitch {:.2}, volume {:.2}, position {:.2} to {:.2}", 
+                       file_path, channel_id, safe_pitch, safe_volume, safe_position, end_pos);
+        } else {
+            log::debug!("Playing sample {} on channel {} with pitch {:.2}, volume {:.2}, and position {:.2}", 
+                       file_path, channel_id, safe_pitch, safe_volume, safe_position);
+        }
         
         Ok(())
     }
@@ -661,20 +751,22 @@ impl AudioEngine {
     
     pub fn get_active_sample_count(&self) -> u32 {
         let voices = self.voices.lock().unwrap();
-        voices.iter().filter(|v| v.active && !v.is_finished()).count() as u32
+        let active_count = voices.iter().filter(|v| v.active && !v.is_finished()).count();
+        self.active_voices.store(active_count, Ordering::Relaxed);
+        active_count as u32
     }
     
     pub fn cleanup_finished_samples(&self) {
-        let mut voices = self.voices.lock().unwrap();
-        let before_count = voices.len();
-        voices.retain(|v| v.active && !v.is_finished());
-        let after_count = voices.len();
-        
-        if before_count != after_count {
-            log::debug!("Cleaned up {} finished voices", before_count - after_count);
+        if let Ok(mut voices) = self.voices.try_lock() {
+            let initial_count = voices.len();
+            voices.retain(|voice| voice.active && !voice.is_finished());
+            let removed_count = initial_count - voices.len();
+            
+            if removed_count > 0 {
+                self.active_voices.fetch_sub(removed_count, Ordering::Relaxed);
+                log::debug!("Cleaned up {} finished voices, {} remaining", removed_count, voices.len());
+            }
         }
-        
-        self.active_voices.store(after_count, Ordering::Relaxed);
     }
     
     pub fn get_channel_count(&self) -> usize {
@@ -720,6 +812,21 @@ impl AudioEngine {
                 file_path.to_string()
             }
         }
+    }
+    
+    // Add method to get current playback position
+    pub fn get_channel_playback_position(&self, channel_id: u32) -> Option<f32> {
+        let voices = self.voices.lock().unwrap();
+        for voice in voices.iter() {
+            if voice.channel_id == channel_id && voice.active {
+                if let Some(start_time) = voice.start_time {
+                    let elapsed_samples = (start_time.elapsed().as_secs_f32() * self.sample_rate as f32) as usize;
+                    let total_position = voice.start_position_samples + elapsed_samples;
+                    return Some(total_position as f32 / voice.sample_data.len() as f32);
+                }
+            }
+        }
+        None
     }
     
     // Compatibility methods for existing code

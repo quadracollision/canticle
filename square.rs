@@ -74,6 +74,7 @@ pub enum Instruction {
     // Audio
     PlaySample(Expression),
     SetReverse { ball_reference: String, speed: Expression },
+    SetSliceArray { markers: Vec<u32> }, // Set slice array for sequential marker playback
     
     // Grid interaction
     SpawnBall { x: Expression, y: Expression, speed: Expression, direction: Expression },
@@ -661,6 +662,14 @@ impl SquareProgram {
                     let val = self.evaluate_expression(value, context);
                     actions.push(ProgramAction::SetGlobalVariable { name: name.clone(), value: val });
                 }
+                Instruction::SetSliceArray { markers } => {
+                    // Convert to ProgramAction with current square coordinates
+                    actions.push(ProgramAction::SetSliceArray {
+                        x: context.square_x,
+                        y: context.square_y,
+                        markers: markers.clone(),
+                    });
+                }
                 Instruction::If { condition, then_block, else_block } => {
                     if let Value::Boolean(true) = self.evaluate_expression(condition, context) {
                         actions.extend(self.execute_instructions(then_block, context));
@@ -936,6 +945,8 @@ pub enum ProgramAction {
     Stop,
     PlaySample(usize),
     SetReverse { ball_reference: String, speed: f32 },
+    SetSliceArray { x: usize, y: usize, markers: Vec<u32> },
+    PlaySliceMarker { x: usize, y: usize, marker_index: u32 },
     SpawnBall { x: f32, y: f32, speed: f32, direction: crate::ball::Direction },
     CreateBall { x: f32, y: f32, speed: f32, direction: crate::ball::Direction },
     CreateSquare { x: i32, y: i32 },
