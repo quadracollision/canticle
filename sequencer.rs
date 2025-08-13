@@ -2759,6 +2759,23 @@ pub async fn run_sequencer(audio_engine: AudioEngine) -> Result<(), Error> {
                     winit::event::WindowEvent::Resized(new_size) => {
                         sequencer_ui.resize(*new_size);
                     }
+                    winit::event::WindowEvent::ReceivedCharacter(ch) => {
+                        // Filter out control characters (backspace, delete, etc.)
+                        if ch.is_control() {
+                            return;
+                        }
+                        
+                        // Pass character directly to program editor
+                        if sequencer_ui.grid.square_menu.is_open() {
+                            if let crate::square_menu::SquareMenuState::ProgramEditor { .. } = sequencer_ui.grid.square_menu.state {
+                                sequencer_ui.grid.square_menu.program_editor.insert_character(*ch);
+                            }
+                        } else if sequencer_ui.grid.library_gui.is_visible() {
+                            if let Some(editor) = sequencer_ui.grid.library_gui.get_current_editor_mut() {
+                                editor.insert_character(*ch);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

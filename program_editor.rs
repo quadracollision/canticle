@@ -269,6 +269,7 @@ impl ProgramEditor {
             self.update_scroll_offset();
         }
 
+        // Handle backspace with proper key repeat
         if self.should_handle_key_repeat(input, VirtualKeyCode::Back) {
             if input.held_shift() {
                 // Shift+Backspace: Delete entire line
@@ -318,6 +319,11 @@ impl ProgramEditor {
     }
 
     fn handle_character_input(&mut self, input: &winit_input_helper::WinitInputHelper, from_library: bool) {
+        // Skip character input handling when using ReceivedCharacter events
+        // This prevents duplicate character insertion
+        // Control keys (backspace, delete, arrows, etc.) are still handled in handle_input_with_context
+        return;
+        
         let shift_pressed = input.held_shift();
         
         // Handle letter keys
@@ -423,40 +429,14 @@ impl ProgramEditor {
         }
     }
     
-    fn insert_character(&mut self, ch: char) {
+    pub fn insert_character(&mut self, ch: char) {
         self.program_text[self.cursor_line].insert(self.cursor_col, ch);
         self.cursor_col += 1;
     }
 
     fn should_handle_key_repeat(&mut self, input: &winit_input_helper::WinitInputHelper, key: VirtualKeyCode) -> bool {
-        let now = Instant::now();
-        
-        // Check if key is currently pressed
-        if !input.key_held(key) {
-            // Key not held, reset timing
-            if input.key_pressed(key) {
-                self.last_key_repeat = Some(now);
-                return true; // Handle initial press
-            }
-            return false;
-        }
-        
-        // Key is held, check timing
-        match self.last_key_repeat {
-            Some(last_time) => {
-                let elapsed = now.duration_since(last_time);
-                if elapsed >= self.key_repeat_rate {
-                    self.last_key_repeat = Some(now);
-                    return true;
-                }
-                false
-            }
-            None => {
-                // First time holding, set initial delay
-                self.last_key_repeat = Some(now);
-                false
-            }
-        }
+        // Simple approach: just use winit's built-in key repeat
+        input.key_pressed(key)
     }
 
     fn update_scroll_offset(&mut self) {
