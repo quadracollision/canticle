@@ -1081,10 +1081,15 @@ impl SimpleProgramParser {
     }
     
     fn parse_hits_function(&self, target: &str) -> Result<Expression, String> {
-        // Parse hits(self), hits(c_red), hits(square(3, 5)), etc.
+        // Parse hits(self), hits(c_red), hits(ball1), hits(square(3, 5)), etc.
         if target == "self" {
             // Return hits for current square
             return Ok(Expression::Variable("__square_hits".to_string()));
+        }
+        
+        // Check if it's a ball ID reference like ball1, ball2, etc.
+        if target.starts_with("ball") && target[4..].chars().all(|c| c.is_ascii_digit()) {
+            return Ok(Expression::Variable(format!("__ball_hits_{}", target)));
         }
         
         // Check if it's a color reference like c_red

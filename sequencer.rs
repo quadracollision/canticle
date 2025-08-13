@@ -20,6 +20,7 @@ use crate::font;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 
 #[derive(Clone, Debug)]
 pub struct CollisionEvent {
@@ -102,6 +103,7 @@ pub struct SequencerGrid {
     // State tracking for reset functionality
     pub original_cells: [[Cell; GRID_WIDTH]; GRID_HEIGHT],
     pub original_balls: Vec<Ball>,
+    pub ball_counter: u32,
 }
 
 impl SequencerGrid {
@@ -128,6 +130,7 @@ impl SequencerGrid {
             // Initialize original state
             original_cells: initial_cells,
             original_balls: Vec::new(),
+            ball_counter: 0,
         }
     }
     
@@ -165,7 +168,9 @@ impl SequencerGrid {
     pub fn place_ball(&mut self, x: usize, y: usize) {
         if x < GRID_WIDTH && y < GRID_HEIGHT {
             // Create a ball at this position but don't start it moving
-            let ball = Ball::new(x, y);
+            self.ball_counter += 1;
+            let ball_id = format!("ball{}", self.ball_counter);
+            let ball = Ball::new(x, y, ball_id);
             self.balls.push(ball);
         }
     }
@@ -1484,14 +1489,16 @@ impl SequencerGrid {
             let grid_x = x.round() as usize;
             let grid_y = y.round() as usize;
             if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
-                let mut new_ball = Ball::new(grid_x, grid_y);
+                self.ball_counter += 1;
+                let ball_id = format!("ball{}", self.ball_counter);
+                let mut new_ball = Ball::new(grid_x, grid_y, ball_id.clone());
                 new_ball.speed = speed;
                 new_ball.direction = direction;
                 new_ball.activate(); // Activate the newly created ball
                 let is_active = new_ball.active;
                 self.balls.push(new_ball);
-                self.log_to_console(format!("Ball created at ({}, {}) - Total balls: {}, Active: {}", 
-                    grid_x, grid_y, self.balls.len(), is_active));
+                self.log_to_console(format!("Ball {} created at ({}, {}) - Total balls: {}, Active: {}", 
+                    ball_id, grid_x, grid_y, self.balls.len(), is_active));
             } else {
                 self.log_to_console(format!("Ball creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
             }
@@ -1527,7 +1534,9 @@ impl SequencerGrid {
             if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
                 if let Some(sample_template) = self.library_manager.get_ball_sample(&library_name, &sample_name) {
                     let template_clone = sample_template.clone();
-                    let mut new_ball = Ball::new(grid_x, grid_y);
+                    self.ball_counter += 1;
+                    let ball_id = format!("ball{}", self.ball_counter);
+                    let mut new_ball = Ball::new(grid_x, grid_y, ball_id.clone());
                     new_ball.speed = template_clone.default_speed;
                     new_ball.direction = template_clone.default_direction;
                     new_ball.color = template_clone.color.clone();
@@ -1541,7 +1550,7 @@ impl SequencerGrid {
                     
                     new_ball.activate();
                     self.balls.push(new_ball);
-                    self.log_to_console(format!("Ball created from sample {}.{} at ({}, {}) with sample path {}", library_name, sample_name, grid_x, grid_y, sample_path));
+                    self.log_to_console(format!("Ball {} created from sample {}.{} at ({}, {}) with sample path {}", ball_id, library_name, sample_name, grid_x, grid_y, sample_path));
                 } else {
                     self.log_to_console(format!("Failed to create ball: sample {}.{} not found", library_name, sample_name));
                 }
@@ -1591,7 +1600,9 @@ impl SequencerGrid {
             let grid_x = x.round() as usize;
             let grid_y = y.round() as usize;
             if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
-                let mut new_ball = Ball::new(grid_x, grid_y);
+                self.ball_counter += 1;
+                let ball_id = format!("ball{}", self.ball_counter);
+                let mut new_ball = Ball::new(grid_x, grid_y, ball_id.clone());
                 
                 // Load audio file if specified
                 if let Some(ref audio_name) = audio_file {
@@ -1634,7 +1645,7 @@ impl SequencerGrid {
                 new_ball.speed = 1.0;
                 new_ball.direction = crate::ball::Direction::Right;
                 self.balls.push(new_ball);
-                self.log_to_console(format!("Ball created with library at ({}, {}) - Total balls: {}", grid_x, grid_y, self.balls.len()));
+                self.log_to_console(format!("Ball {} created with library at ({}, {}) - Total balls: {}", ball_id, grid_x, grid_y, self.balls.len()));
             } else {
                 self.log_to_console(format!("Ball creation failed - coordinates ({}, {}) out of bounds", grid_x, grid_y));
             }
@@ -1671,7 +1682,7 @@ impl SequencerGrid {
             if UPDATE_COUNTER % 100 == 0 {
                 let active = self.audio_engine.get_active_sample_count();
                 let cache_size = self.audio_engine.get_cache_size();
-                self.log_to_console(format!("Audio: {} active samples, {} cached", active, cache_size));
+                // self.log_to_console(format!("Audio: {} active samples, {} cached", active, cache_size));
             }
         }
         
@@ -1696,6 +1707,9 @@ pub struct SequencerUI {
     label_editing_y: usize,
     current_label: String,
     label_editing_line: usize, // 0 for first line, 1 for second line
+    // Track last cursor position for console logging
+    last_cursor_x: usize,
+    last_cursor_y: usize,
 }
 
 impl SequencerUI {
@@ -1704,21 +1718,63 @@ impl SequencerUI {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
         let pixels = Pixels::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)?;
         
-        // Use the same audio engine for the grid (with channels already created)
-        let grid_audio_engine = AudioEngine::new().map_err(|e| Error::UserDefined(Box::new(e)))?;
+        let grid = SequencerGrid::new(audio_engine);
         
         Ok(Self {
-            grid: SequencerGrid::new(audio_engine),
+            grid,
             pixels,
             input: WinitInputHelper::new(),
             last_update: std::time::Instant::now(),
-            audio_engine: grid_audio_engine,
+            audio_engine: AudioEngine::new().map_err(|e| Error::UserDefined(Box::new(e)))?,
             label_editing_mode: false,
             label_editing_x: 0,
             label_editing_y: 0,
             current_label: String::new(),
             label_editing_line: 0,
+            last_cursor_x: 0,
+            last_cursor_y: 0,
         })
+    }
+    
+    fn log_cursor_position_if_changed(&mut self) {
+        let current_x = self.grid.cursor.x;
+        let current_y = self.grid.cursor.y;
+        
+        // Only log if position actually changed
+        if current_x != self.last_cursor_x || current_y != self.last_cursor_y {
+            self.last_cursor_x = current_x;
+            self.last_cursor_y = current_y;
+            
+            // Get ball information at cursor position
+            let ball_info = if let Some(ball_index) = self.grid.get_ball_at(current_x, current_y) {
+                if let Some(ball) = self.grid.balls.get(ball_index) {
+                    let sample_name = ball.sample_path.as_ref()
+                        .and_then(|path| std::path::Path::new(path).file_stem())
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("no_sample");
+                    format!("Ball: {} ({})", ball.id, sample_name)
+                } else {
+                    "Ball: unknown".to_string()
+                }
+            } else {
+                "Ball: none".to_string()
+            };
+            
+            // Get square information at cursor position
+            let square_info = if self.grid.cells[current_y][current_x].is_square() {
+                let cell = &self.grid.cells[current_y][current_x];
+                if let Some(ref display_text) = cell.display_text {
+                    format!("Square: {}", display_text)
+                } else {
+                    "Square: unlabeled".to_string()
+                }
+            } else {
+                "Square: none".to_string()
+            };
+            
+            // Log to in-game console
+            self.grid.log_to_console(format!("Cursor: ({}, {}) | {} | {}", current_x, current_y, ball_info, square_info));
+        }
     }
     
     pub fn handle_input(&mut self, event: &Event<()>) {
@@ -1728,6 +1784,7 @@ impl SequencerUI {
                 self.handle_label_editing_input();
                 return;
             }
+            
             // Handle context menu input first
             if let Some(action) = self.grid.context_menu.handle_input(&self.input, &self.grid.balls) {
                  match action {
@@ -1748,6 +1805,18 @@ impl SequencerUI {
                      }
                      ContextMenuAction::AddSampleToLibrary { ball_index } => {
                          self.add_sample_to_library_for_ball(ball_index);
+                     }
+                     ContextMenuAction::OpenAudioPlayer { ball_index } => {
+                         if let Some(ball) = self.grid.balls.get(ball_index) {
+                             if let Some(ref sample_path) = ball.sample_path {
+                                 // Open the audio player with the ball's sample
+                                 if let Err(e) = self.grid.audio_player.open_sample(sample_path.clone(), &mut self.grid.audio_engine) {
+                                     self.grid.log_to_console(format!("Failed to open audio player: {}", e));
+                                 } else {
+                                     self.grid.log_to_console(format!("Opened audio player for ball sample: {}", sample_path));
+                                 }
+                             }
+                         }
                      }
                  }
                  return;
@@ -2016,18 +2085,24 @@ impl SequencerUI {
                 return; // Block all other input while audio player is open
             }
             
-            // Normal grid navigation (only when library GUI and audio player are not open)
-            if self.input.key_pressed(VirtualKeyCode::Up) {
-                self.grid.cursor.move_up();
-            }
-            if self.input.key_pressed(VirtualKeyCode::Down) {
-                self.grid.cursor.move_down();
-            }
-            if self.input.key_pressed(VirtualKeyCode::Left) {
-                self.grid.cursor.move_left();
-            }
-            if self.input.key_pressed(VirtualKeyCode::Right) {
-                self.grid.cursor.move_right();
+            // Normal grid navigation (only when library GUI, audio player, and square menu are not open)
+            if !self.grid.square_menu.is_open() {
+                if self.input.key_pressed(VirtualKeyCode::Up) {
+                    self.grid.cursor.move_up();
+                    self.log_cursor_position_if_changed();
+                }
+                if self.input.key_pressed(VirtualKeyCode::Down) {
+                    self.grid.cursor.move_down();
+                    self.log_cursor_position_if_changed();
+                }
+                if self.input.key_pressed(VirtualKeyCode::Left) {
+                    self.grid.cursor.move_left();
+                    self.log_cursor_position_if_changed();
+                }
+                if self.input.key_pressed(VirtualKeyCode::Right) {
+                    self.grid.cursor.move_right();
+                    self.log_cursor_position_if_changed();
+                }
             }
             
             // Shape placement / Label editing
@@ -2218,6 +2293,9 @@ impl SequencerUI {
         let delta_time = now.duration_since(self.last_update).as_secs_f32();
         self.last_update = now;
         
+        // Update context menu timing
+        self.grid.context_menu.update(delta_time);
+        
         // Update balls with delta time
         let triggered_positions = self.grid.update_balls(delta_time);
         
@@ -2308,9 +2386,6 @@ impl SequencerUI {
         // Draw console area
         Self::draw_console_static(frame, &self.grid.console_messages);
         
-        // Draw cursor coordinates in top left corner
-        Self::draw_cursor_coordinates(frame, self.grid.cursor.x, self.grid.cursor.y);
-        
         self.pixels.render()
     }
     
@@ -2351,7 +2426,9 @@ impl SequencerUI {
     
     fn draw_cursor_coordinates(frame: &mut [u8], cursor_x: usize, cursor_y: usize) {
         let coord_text = format!("({}, {})", cursor_x, cursor_y);
-        Self::draw_menu_text(frame, &coord_text, 10, 10, [255, 255, 255], false); // White text in top left
+        // Position coordinates in the black area above grid (0,0)
+        // Grid (0,0) starts at pixel (0,0), so we position the text just above it
+        Self::draw_menu_text(frame, &coord_text, 5, 25, [255, 255, 255], false); // White text above grid (0,0)
     }
     
     fn draw_menu_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {

@@ -1,4 +1,5 @@
 use winit::event::VirtualKeyCode;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ContextMenuState {
@@ -12,6 +13,9 @@ pub enum ContextMenuState {
 
 pub struct ContextMenu {
     pub state: ContextMenuState,
+    left_key_held_time: f32,
+    right_key_held_time: f32,
+    last_update: Option<Instant>,
 }
 
 const BALL_MENU_OPTIONS: &[&str] = &["Direction", "Speed", "Relative Speed", "Sample", "Color"];
@@ -28,6 +32,9 @@ impl ContextMenu {
     pub fn new() -> Self {
         ContextMenu {
             state: ContextMenuState::None,
+            left_key_held_time: 0.0,
+            right_key_held_time: 0.0,
+            last_update: None,
         }
     }
 
@@ -47,7 +54,17 @@ impl ContextMenu {
         !matches!(self.state, ContextMenuState::None)
     }
 
+    pub fn update(&mut self, delta_time: f32) {
+        self.last_update = Some(Instant::now());
+    }
+
     pub fn handle_input(&mut self, input: &winit_input_helper::WinitInputHelper, balls: &[Ball]) -> Option<ContextMenuAction> {
+        let delta_time = if let Some(last) = self.last_update {
+            last.elapsed().as_secs_f32()
+        } else {
+            0.016 // Default to ~60fps
+        };
+
         match self.state {
             ContextMenuState::BallMenu { ball_index, selected_option } => {
                 if input.key_pressed(VirtualKeyCode::Escape) {
@@ -62,6 +79,19 @@ impl ContextMenu {
                 if input.key_pressed(VirtualKeyCode::Down) {
                     let new_option = (selected_option + 1) % BALL_MENU_OPTIONS.len();
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: new_option };
+                    return None;
+                }
+                if input.key_pressed(VirtualKeyCode::Return) {
+                    // Handle Enter key for Sample option
+                    if selected_option == 3 {
+                        // Check if the ball has a sample loaded
+                        if let Some(ball) = balls.get(ball_index) {
+                            if ball.sample_path.is_some() {
+                                self.close();
+                                return Some(ContextMenuAction::OpenAudioPlayer { ball_index });
+                            }
+                        }
+                    }
                     return None;
                 }
                 if input.key_pressed(VirtualKeyCode::Space) {
@@ -132,16 +162,43 @@ impl ContextMenu {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 1 };
                     return None;
                 }
-                if input.key_pressed(VirtualKeyCode::Left) {
-                    let new_speed = (speed - SPEED_STEP).max(MIN_SPEED);
+                
+                let delta_time = if let Some(last) = self.last_update {
+                    last.elapsed().as_secs_f32()
+                } else {
+                    0.016 // Default to ~60fps
+                };
+                
+                let mut speed_change = 0.0;
+                
+                if input.key_held(VirtualKeyCode::Left) {
+                    self.left_key_held_time += delta_time;
+                    self.right_key_held_time = 0.0; // Reset opposite direction
+                    
+                    // Calculate acceleration factor (1x to 10x over 2 seconds)
+                    let acceleration = (1.0 + (self.left_key_held_time / 2.0) * 9.0).min(10.0);
+                    speed_change = -SPEED_STEP * acceleration * delta_time * 60.0; // Scale for frame rate
+                } else {
+                    self.left_key_held_time = 0.0;
+                }
+                
+                if input.key_held(VirtualKeyCode::Right) {
+                    self.right_key_held_time += delta_time;
+                    self.left_key_held_time = 0.0; // Reset opposite direction
+                    
+                    // Calculate acceleration factor (1x to 10x over 2 seconds)
+                    let acceleration = (1.0 + (self.right_key_held_time / 2.0) * 9.0).min(10.0);
+                    speed_change = SPEED_STEP * acceleration * delta_time * 60.0; // Scale for frame rate
+                } else {
+                    self.right_key_held_time = 0.0;
+                }
+                
+                if speed_change != 0.0 {
+                    let new_speed = (speed + speed_change).clamp(MIN_SPEED, MAX_SPEED);
                     self.state = ContextMenuState::BallSpeed { ball_index, speed: new_speed };
                     return None;
                 }
-                if input.key_pressed(VirtualKeyCode::Right) {
-                    let new_speed = (speed + SPEED_STEP).min(MAX_SPEED);
-                    self.state = ContextMenuState::BallSpeed { ball_index, speed: new_speed };
-                    return None;
-                }
+                
                 if input.key_pressed(VirtualKeyCode::Space) {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 1 };
                     return Some(ContextMenuAction::SetSpeed { ball_index, speed });
@@ -261,6 +318,7 @@ pub enum ContextMenuAction {
     SetColor { ball_index: usize, color: String },
     OpenFileDialog { ball_index: usize },
     AddSampleToLibrary { ball_index: usize },
+    OpenAudioPlayer { ball_index: usize },
 }
 
 // Import types from modules

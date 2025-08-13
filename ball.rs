@@ -27,10 +27,11 @@ pub struct Ball {
     pub color: String,
     pub pitch: f32, // Pitch multiplier (1.0 = normal, 2.0 = octave up, 0.5 = octave down)
     pub volume: f32, // Volume multiplier (1.0 = normal, 0.0 = silent, 2.0 = double volume)
+    pub id: String, // New unique identifier field
 }
 
 impl Ball {
-    pub fn new(x: usize, y: usize) -> Self {
+    pub fn new(x: usize, y: usize, id: String) -> Self {
         Self {
             x: x as f32 + 0.5,
             y: y as f32 + 0.5,
@@ -38,13 +39,14 @@ impl Ball {
             original_y: y as f32 + 0.5,
             direction: Direction::Up,
             sample_path: None,
-            speed: 2.0, // 2 grid units per second
-            active: false, // Start inactive
+            speed: 2.0,
+            active: false,
             last_grid_x: x,
             last_grid_y: y,
-            color: "White".to_string(), // Default color
-            pitch: 1.0, // Default pitch (normal)
-            volume: 1.0, // Default volume (normal)
+            color: "White".to_string(),
+            pitch: 1.0,
+            volume: 1.0,
+            id, // Set the unique identifier
         }
     }
     
