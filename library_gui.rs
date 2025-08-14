@@ -39,6 +39,7 @@ pub enum LibraryGuiState {
         selected_item: usize,
         scroll_offset: usize,
         editing_mode: Option<EditingMode>,
+        target_square: Option<(usize, usize)>, // Add this field to track target square
     },
 }
 
@@ -82,6 +83,7 @@ pub enum LibraryGuiAction {
     SaveProgramToFile { editor: ProgramEditor },
     LoadProgramFromFile,
     OpenAudioPlayer { library_name: String, sample_name: String },
+    LoadProgramToSquare { program: Program, square_x: usize, square_y: usize },
 }
 
 const LIBRARY_GUI_WIDTH: usize = 580;
@@ -116,9 +118,24 @@ impl LibraryGui {
                 selected_item: 0,
                 scroll_offset: 0,
                 editing_mode: None,
+                target_square: None, // No target square when opened normally
             },
             LibraryGuiState::Visible { .. } => LibraryGuiState::Hidden,
         };
+    }
+
+    // Add this new method for opening with Programs column selected
+    pub fn open_for_program_selection(&mut self, square_x: usize, square_y: usize) {
+        self.state = LibraryGuiState::Visible {
+            selected_column: LibraryColumn::Programs,
+            selected_library: "lib".to_string(),
+            selected_item: 0,
+            scroll_offset: 0,
+            editing_mode: None, // Ensure we're not in editing mode
+            target_square: Some((square_x, square_y)), // Store the target square
+        };
+        // Add debug logging
+        println!("Library GUI opened for program selection at square ({}, {})", square_x, square_y);
     }
 
     pub fn is_visible(&self) -> bool {
@@ -147,21 +164,28 @@ impl LibraryGui {
 
     pub fn handle_input(&mut self, input: &WinitInputHelper, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Option<LibraryGuiAction> {
         // Extract state to avoid borrowing conflicts
-        let (mut selected_column, mut selected_library, mut selected_item, mut scroll_offset, mut editing_mode) = 
+        let (mut selected_column, mut selected_library, mut selected_item, mut scroll_offset, mut editing_mode, mut target_square) = 
             if let LibraryGuiState::Visible { 
                 selected_column, 
                 selected_library, 
                 selected_item, 
                 scroll_offset,
-                editing_mode 
+                editing_mode,
+                target_square
             } = &self.state {
-                (selected_column.clone(), selected_library.clone(), *selected_item, *scroll_offset, editing_mode.clone())
+                (selected_column.clone(), selected_library.clone(), *selected_item, *scroll_offset, editing_mode.clone(), *target_square)
             } else {
                 return None;
             };
             
-        // Handle editing mode input
+        // If opened from square menu (target_square is Some), don't allow editing mode
+        if target_square.is_some() && editing_mode.is_some() {
+            editing_mode = None;
+        }
+            
+        // Handle editing mode input ONLY if we're actually in editing mode
         if let Some(ref mut edit_mode) = editing_mode {
+            println!("Library GUI is in editing mode: {:?}", edit_mode);
             let result = self.handle_editing_input(input, edit_mode, &selected_library);
             // Update state - but don't overwrite editing_mode if it was set to None by handle_editing_input
             if let LibraryGuiState::Visible { editing_mode: ref current_editing_mode, .. } = &self.state {
@@ -176,8 +200,14 @@ impl LibraryGui {
                 selected_item,
                 scroll_offset,
                 editing_mode,
+                target_square,
             };
             return result;
+        }
+
+        // Add debug output for navigation
+        if input.key_pressed(VirtualKeyCode::Up) || input.key_pressed(VirtualKeyCode::Down) {
+            println!("Navigation key pressed, current item: {}, target_square: {:?}", selected_item, target_square);
         }
 
         // Handle escape key to close library when not in editing mode
@@ -254,26 +284,29 @@ impl LibraryGui {
         }
 
         if input.held_shift() && input.key_pressed(VirtualKeyCode::Space) { // Create new program or load sample
-            match selected_column {
-                LibraryColumn::Programs => {
-                    let initial_text = vec!["def new_program".to_string(), "".to_string()];
-                    editing_mode = Some(EditingMode::CreateProgram {
-                        name: "new_program".to_string(),
-                        editor: ProgramEditor::new_with_text(initial_text),
-                    });
-                }
-                LibraryColumn::Samples => {
-                    // Check if the selected sample is auto or library
-                    let all_samples = self.collect_all_samples(library_manager, &selected_library);
-                    if let Some(sample_entry) = all_samples.get(selected_item) {
-                        match &sample_entry.source {
-                            SampleSource::Auto => {
-                                result = Some(LibraryGuiAction::LoadAutoSample);
-                            },
-                            SampleSource::Library { library_name } => {
-                                result = Some(LibraryGuiAction::LoadSample {
-                                    library_name: library_name.clone(),
-                                });
+            // Only allow creating new programs when NOT opened from square menu
+            if target_square.is_none() {
+                match selected_column {
+                    LibraryColumn::Programs => {
+                        let initial_text = vec!["def new_program".to_string(), "".to_string()];
+                        editing_mode = Some(EditingMode::CreateProgram {
+                            name: "new_program".to_string(),
+                            editor: ProgramEditor::new_with_text(initial_text),
+                        });
+                    }
+                    LibraryColumn::Samples => {
+                        // Check if the selected sample is auto or library
+                        let all_samples = self.collect_all_samples(library_manager, &selected_library);
+                        if let Some(sample_entry) = all_samples.get(selected_item) {
+                            match &sample_entry.source {
+                                SampleSource::Auto => {
+                                    result = Some(LibraryGuiAction::LoadAutoSample);
+                                },
+                                SampleSource::Library { library_name } => {
+                                    result = Some(LibraryGuiAction::LoadSample {
+                                        library_name: library_name.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -326,16 +359,30 @@ impl LibraryGui {
         if input.key_pressed(VirtualKeyCode::Space) && !input.held_shift() {
             match selected_column {
                 LibraryColumn::Programs => {
-                    // Open existing program
                     let all_programs = self.collect_all_programs(library_manager, grid);
                     if let Some(program_entry) = all_programs.get(selected_item) {
-                        // For both square and library programs, use the editing mode
-                        let script = self.program_to_source_code(&program_entry.program);
-                        editing_mode = Some(EditingMode::EditProgram {
-                            name: program_entry.name.clone(),
-                            source: program_entry.source.clone(),
-                            editor: ProgramEditor::new_with_text(script),
-                        });
+                        // Check if we have a target square (opened from square menu)
+                        println!("Space pressed on program: {}, target_square: {:?}", program_entry.name, target_square);
+                        if let Some((square_x, square_y)) = target_square {
+                            // Load program into the target square and close library
+                            println!("Loading program '{}' into square ({}, {})", program_entry.name, square_x, square_y);
+                            result = Some(LibraryGuiAction::LoadProgramToSquare {
+                                program: program_entry.program.clone(),
+                                square_x,
+                                square_y,
+                            });
+                            // Close the library GUI
+                            self.state = LibraryGuiState::Hidden;
+                        } else {
+                            // Normal behavior - open for editing
+                            println!("Opening program '{}' for editing", program_entry.name);
+                            let script = self.program_to_source_code(&program_entry.program);
+                            editing_mode = Some(EditingMode::EditProgram {
+                                name: program_entry.name.clone(),
+                                source: program_entry.source.clone(),
+                                editor: ProgramEditor::new_with_text(script),
+                            });
+                        }
                     }
                 }
                 LibraryColumn::Samples => {
@@ -354,6 +401,7 @@ impl LibraryGui {
             selected_item,
             scroll_offset,
             editing_mode,
+            target_square,
         };
         
         result
@@ -422,6 +470,9 @@ impl LibraryGui {
                     ProgramEditorAction::LoadFromFile => {
                         return Some(LibraryGuiAction::LoadProgramFromFile);
                     },
+                    ProgramEditorAction::OpenLibrary => {
+                        // This shouldn't happen in library GUI context, just ignore
+                    },
                     ProgramEditorAction::None => {
                         // Do nothing
                     }
@@ -470,6 +521,9 @@ impl LibraryGui {
                     },
                     ProgramEditorAction::LoadFromFile => {
                         return Some(LibraryGuiAction::LoadProgramFromFile);
+                    },
+                    ProgramEditorAction::OpenLibrary => {
+                        // This shouldn't happen in library GUI context, just ignore
                     },
                     ProgramEditorAction::None => {
                         // Do nothing
@@ -771,7 +825,8 @@ impl LibraryGui {
             selected_library, 
             selected_item, 
             scroll_offset,
-            editing_mode 
+            editing_mode,
+            target_square
         } = &self.state {
             
             // Calculate position (center of screen)

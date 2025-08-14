@@ -25,6 +25,7 @@ pub enum ProgramEditorAction {
     CloseWithoutSaving,
     SaveToFile,
     LoadFromFile,
+    OpenLibrary, // Add this new variant
     Continue,
     None,
 }

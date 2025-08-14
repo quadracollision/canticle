@@ -232,18 +232,26 @@ impl AudioPlayer {
 
             // Shift+Space to add marker
             if input.key_pressed(VirtualKeyCode::Space) && input.held_shift() {
-                // Add new marker at cursor position
-                markers.push(AudioMarker {
-                    position: *cursor_position,
-                    name: String::new(), // Temporary name, will be set below
+                // Check if a marker already exists at or very close to the cursor position
+                let tolerance = 0.001; // Small tolerance for floating point comparison
+                let marker_exists = markers.iter().any(|marker| {
+                    (marker.position - *cursor_position).abs() < tolerance
                 });
                 
-                // Sort all markers by position
-                markers.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
-                
-                // Renumber all markers sequentially
-                for (index, marker) in markers.iter_mut().enumerate() {
-                    marker.name = format!("{}", index + 1);
+                if !marker_exists {
+                    // Add new marker at cursor position
+                    markers.push(AudioMarker {
+                        position: *cursor_position,
+                        name: String::new(), // Temporary name, will be set below
+                    });
+                    
+                    // Sort all markers by position
+                    markers.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
+                    
+                    // Renumber all markers sequentially
+                    for (index, marker) in markers.iter_mut().enumerate() {
+                        marker.name = format!("{}", index + 1);
+                    }
                 }
             }
 

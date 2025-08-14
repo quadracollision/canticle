@@ -1718,7 +1718,10 @@ impl SequencerUI {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, window);
         let pixels = Pixels::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)?;
         
-        let grid = SequencerGrid::new(audio_engine);
+        let mut grid = SequencerGrid::new(audio_engine);
+        
+        // Add startup message to console
+        grid.log_to_console("Quadracollision Canticle v0.001".to_string());
         
         Ok(Self {
             grid,
@@ -1901,6 +1904,10 @@ impl SequencerUI {
                         SquareMenuAction::LoadProgramFromFile => {
                             self.load_program_from_file();
                         }
+                        SquareMenuAction::OpenLibrary { square_x, square_y } => {
+                        // Open library GUI with Programs column selected for the specific square
+                        self.grid.library_gui.open_for_program_selection(square_x, square_y);
+                    }
                     }
                 }
                 return; // Don't process other input while square menu is open
@@ -2060,6 +2067,15 @@ impl SequencerUI {
                                         self.grid.log_to_console(format!("Opened audio player for {}", sample_name));
                                     }
                                 }
+                            }
+                        }
+                        LibraryGuiAction::LoadProgramToSquare { program, square_x, square_y } => {
+                            // Load the selected program into the target square
+                            if square_x < GRID_WIDTH && square_y < GRID_HEIGHT {
+                                self.grid.cells[square_y][square_x].program.add_program(program);
+                                let program_count = self.grid.cells[square_y][square_x].program.programs.len();
+                                self.grid.cells[square_y][square_x].program.set_active_program(Some(program_count - 1));
+                                self.grid.log_to_console(format!("Loaded program into square at ({}, {})", square_x, square_y));
                             }
                         }
                     }}

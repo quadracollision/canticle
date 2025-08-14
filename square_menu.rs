@@ -203,7 +203,13 @@ impl SquareContextMenu {
                     }
                     return None;
                 }
-                None
+                
+                // Add Shift+Enter detection for opening library when "Edit Program" is selected
+                if input.held_shift() && input.key_pressed(VirtualKeyCode::Return) && selected_option == 0 {
+                    return Some(SquareMenuAction::OpenLibrary { square_x, square_y });
+                }
+                
+                None // Add this line to ensure the function always returns Option<SquareMenuAction>
             }
             SquareMenuState::ProgramEditor { square_x, square_y, cursor_line: _, cursor_col: _ } => {
                 match self.program_editor.handle_input(input) {
@@ -228,6 +234,9 @@ impl SquareContextMenu {
                     }
                     ProgramEditorAction::LoadFromFile => {
                         return Some(SquareMenuAction::LoadProgramFromFile);
+                    }
+                    ProgramEditorAction::OpenLibrary => {
+                        return Some(SquareMenuAction::OpenLibrary { square_x, square_y });
                     }
                     ProgramEditorAction::Continue => {
                         // Continue editing
@@ -324,6 +333,7 @@ pub enum SquareMenuAction {
     ClearPrograms { square_x: usize, square_y: usize },
     SaveProgramToFile,
     LoadProgramFromFile,
+    OpenLibrary { square_x: usize, square_y: usize }, // Add this new variant
 }
 
 // Helper functions for drawing (similar to context_menu.rs)
