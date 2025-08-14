@@ -599,7 +599,7 @@ impl SimpleProgramParser {
                             "down-left" => Expression::Literal(Value::Direction(Direction::DownLeft)),
                             "down-right" => Expression::Literal(Value::Direction(Direction::DownRight)),
                             _ => {
-                                // If not a literal direction, try to parse as an expression (variable)
+                                // Try to parse as coordinate or variable
                                 self.parse_coordinate_expression(direction_str)?
                             }
                         };
@@ -700,6 +700,21 @@ impl SimpleProgramParser {
     
     fn parse_coordinate_expression(&self, coord_str: &str) -> Result<Expression, String> {
         let coord_str = coord_str.trim();
+        
+        // Check for coordinate syntax like (0, 3)
+        if coord_str.starts_with('(') && coord_str.ends_with(')') {
+            let inner = &coord_str[1..coord_str.len()-1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 2 {
+                let x_expr = self.parse_coordinate_expression(parts[0])?;
+                let y_expr = self.parse_coordinate_expression(parts[1])?;
+                
+                // If both are literal numbers, create a coordinate value
+                if let (Expression::Literal(Value::Number(x)), Expression::Literal(Value::Number(y))) = (&x_expr, &y_expr) {
+                    return Ok(Expression::Literal(Value::Coordinate(*x, *y)));
+                }
+            }
+        }
         
         // Check for string literals (quoted strings)
         if (coord_str.starts_with('"') && coord_str.ends_with('"') && coord_str.len() >= 2) ||
@@ -1483,6 +1498,7 @@ impl ProgramExecutor {
                         Value::Boolean(b) => b.to_string(),
                         Value::Direction(d) => format!("{:?}", d),
                         Value::String(s) => s,
+                        Value::Coordinate(x, y) => format!("({}, {})", x, y),
                     };
                     println!("DEBUG: Final display text: {}", display_text);
                     actions.push(ProgramAction::Print(display_text));

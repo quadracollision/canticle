@@ -564,7 +564,11 @@ fn draw_ball_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_optio
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        if ball_x * CELL_SIZE >= menu_width {
+            menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
+        } else {
+            menu_x = 0;
+        }
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -626,7 +630,11 @@ fn draw_direction_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        if ball_x * CELL_SIZE >= menu_width {
+            menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
+        } else {
+            menu_x = 0;
+        }
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -654,7 +662,7 @@ fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32)
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -732,7 +740,7 @@ fn draw_color_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_opti
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -781,7 +789,7 @@ fn draw_relative_speed_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, sele
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -861,7 +869,7 @@ fn draw_enhanced_relative_speed_menu(frame: &mut [u8], ball_x: usize, ball_y: us
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;
@@ -940,7 +948,7 @@ fn draw_custom_ratio_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, select
     
     // Adjust if menu would go off screen
     if menu_x + menu_width > WINDOW_WIDTH {
-        menu_x = ball_x * CELL_SIZE - menu_width;
+        menu_x = (ball_x * CELL_SIZE).saturating_sub(menu_width);
     }
     if menu_y + menu_height > WINDOW_HEIGHT {
         menu_y = WINDOW_HEIGHT - menu_height;

@@ -10,6 +10,7 @@ pub enum Value {
     Direction(crate::ball::Direction),
     Boolean(bool),
     String(String),
+    Coordinate(f32, f32), // Add coordinate support
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -838,6 +839,7 @@ impl SquareProgram {
                         Value::Boolean(b) => b.to_string(),
                         Value::Direction(d) => format!("{:?}", d),
                         Value::String(s) => s,
+                        Value::Coordinate(x, y) => format!("({}, {})", x, y),
                     };
                     println!("DEBUG SQUARE: Final display text: {}", display_text);
                     actions.push(ProgramAction::Print(display_text));
@@ -939,6 +941,7 @@ impl SquareProgram {
 pub enum ProgramAction {
     SetSpeed(f32),
     SetDirection(crate::ball::Direction),
+    SetDirectionToCoordinate { target_x: f32, target_y: f32 },
     SetPitch(f32),
     SetVolume(f32),
     Bounce,

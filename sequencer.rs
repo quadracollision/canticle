@@ -1203,6 +1203,69 @@ impl SequencerGrid {
                                                         all_log_messages.push("    Slice array already exists, skipping setup".to_string());
                                                     }
                                                 }
+                                                ProgramAction::SetDirectionToCoordinate { target_x, target_y } => {
+                                                    all_log_messages.push(format!("  → SetDirectionToCoordinate: target ({}, {})", target_x, target_y));
+                                                    
+                                                    // Calculate direction vector to target
+                                                    let current_x = ball.x;
+                                                    let current_y = ball.y;
+                                                    let target_center_x = target_x + 0.5;
+                                                    let target_center_y = target_y + 0.5;
+                                                    
+                                                    let dx = target_center_x - current_x;
+                                                    let dy = target_center_y - current_y;
+                                                    let distance = (dx * dx + dy * dy).sqrt();
+                                                    
+                                                    if distance > 0.001 { // Avoid division by zero
+                                                        // Normalize direction vector
+                                                        let norm_dx = dx / distance;
+                                                        let norm_dy = dy / distance;
+                                                        
+                                                        // Find closest direction
+                                                        let direction = if norm_dx.abs() > norm_dy.abs() {
+                                                            if norm_dx > 0.0 { Direction::Right } else { Direction::Left }
+                                                        } else {
+                                                            if norm_dy > 0.0 { Direction::Down } else { Direction::Up }
+                                                        };
+                                                        
+                                                        // Check for diagonal movement
+                                                        let direction = if (norm_dx.abs() - norm_dy.abs()).abs() < 0.3 { // Close to diagonal
+                                                            match (norm_dx > 0.0, norm_dy > 0.0) {
+                                                                (true, true) => Direction::DownRight,
+                                                                (true, false) => Direction::UpRight,
+                                                                (false, true) => Direction::DownLeft,
+                                                                (false, false) => Direction::UpLeft,
+                                                            }
+                                                        } else {
+                                                            direction
+                                                        };
+                                                        
+                                                        ball.direction = direction;
+                                                        
+                                                        // Calculate time to reach target and adjust position for smooth movement
+                                                        let time_to_target = distance / ball.speed;
+                                                        let (dir_dx, dir_dy): (f32, f32) = match ball.direction {
+                                                            Direction::Up => (0.0, -1.0),
+                                                            Direction::Down => (0.0, 1.0),
+                                                            Direction::Left => (-1.0, 0.0),
+                                                            Direction::Right => (1.0, 0.0),
+                                                            Direction::UpLeft => (-0.707, -0.707),
+                                                            Direction::UpRight => (0.707, -0.707),
+                                                            Direction::DownLeft => (-0.707, 0.707),
+                                                            Direction::DownRight => (0.707, 0.707),
+                                                        };
+                                                        
+                                                        // Move ball back along the direction vector to ensure smooth arrival
+                                                        ball.x = target_center_x - (dir_dx * ball.speed * time_to_target);
+                                                        ball.y = target_center_y - (dir_dy * ball.speed * time_to_target);
+                                                        
+                                                        // Ensure ball stays within bounds
+                                                        ball.x = ball.x.max(0.0).min(GRID_WIDTH as f32);
+                                                        ball.y = ball.y.max(0.0).min(GRID_HEIGHT as f32);
+                                                        
+                                                        should_snap_to_grid_center = true;
+                                                    }
+                                                }
                                                 ProgramAction::PlaySliceMarker { x, y, marker_index } => {
                                                     all_log_messages.push(format!("  → PlaySliceMarker at ({}, {}) marker {}", x, y, marker_index));
                                                     // Get the current slice array for this square
@@ -1302,11 +1365,65 @@ impl SequencerGrid {
                                         
                                         // Reset position based on action type
                                         if should_snap_to_grid_center {
-                                            // Snap ball to center of current grid cell for SetDirection
-                                            ball.x = grid_x as f32 + 0.5;
-                                            ball.y = grid_y as f32 + 0.5;
-                                            ball.last_grid_x = grid_x;
-                                            ball.last_grid_y = grid_y;
+                                            // Calculate proper diagonal trajectory instead of snapping to center
+                                            let target_grid_x = grid_x as f32 + 0.5;
+                                            let target_grid_y = grid_y as f32 + 0.5;
+                                            
+                                            // Get the new direction vector with explicit f32 types
+                                            let (new_dx, new_dy): (f32, f32) = match ball.direction {
+                                                Direction::Up => (0.0, -1.0),
+                                                Direction::Down => (0.0, 1.0),
+                                                Direction::Left => (-1.0, 0.0),
+                                                Direction::Right => (1.0, 0.0),
+                                                Direction::UpLeft => (-0.707, -0.707),
+                                                Direction::UpRight => (0.707, -0.707),
+                                                Direction::DownLeft => (-0.707, 0.707),
+                                                Direction::DownRight => (0.707, 0.707),
+                                            };
+                                            
+                                            // Calculate the distance from current position to target square center
+                                            let dx_to_target = target_grid_x - ball.x;
+                                            let dy_to_target = target_grid_y - ball.y;
+                                            
+                                            // Calculate how long it would take to reach the target at current speed
+                                            let distance_to_target = (dx_to_target * dx_to_target + dy_to_target * dy_to_target).sqrt();
+                                            
+                                            // Only adjust position if we're not already very close to the target
+                                            if distance_to_target > 0.1 {
+                                                // Calculate the time it would take to reach the next grid boundary
+                                                // in the new direction at current speed
+                                                let time_to_boundary = if new_dx.abs() > 0.001 {
+                                                    if new_dx > 0.0 {
+                                                        ((grid_x + 1) as f32 - ball.x) / new_dx
+                                                    } else {
+                                                        (grid_x as f32 - ball.x) / new_dx
+                                                    }
+                                                } else if new_dy.abs() > 0.001 {
+                                                    if new_dy > 0.0 {
+                                                        ((grid_y + 1) as f32 - ball.y) / new_dy
+                                                    } else {
+                                                        (grid_y as f32 - ball.y) / new_dy
+                                                    }
+                                                } else {
+                                                    1.0 // fallback
+                                                };
+                                                
+                                                // Adjust position to maintain timing - move ball back along the new direction
+                                                // so it will hit the target square at the right time
+                                                if time_to_boundary > 0.0 {
+                                                    let adjustment_distance = ball.speed * time_to_boundary * 0.5; // Adjust by half the time to boundary
+                                                    ball.x -= new_dx * adjustment_distance;
+                                                    ball.y -= new_dy * adjustment_distance;
+                                                    
+                                                    // Ensure ball stays within grid bounds
+                                                    ball.x = ball.x.max(0.1).min(GRID_WIDTH as f32 - 0.1);
+                                                    ball.y = ball.y.max(0.1).min(GRID_HEIGHT as f32 - 0.1);
+                                                }
+                                            }
+                                            
+                                            // Update last grid position
+                                            ball.last_grid_x = ball.x.floor() as usize;
+                                            ball.last_grid_y = ball.y.floor() as usize;
                                         } else if should_reset_position {
                                             // Move ball back to previous position for other actions
                                             ball.x = old_x;
@@ -2143,10 +2260,16 @@ impl SequencerUI {
                  self.grid.place_ball(self.grid.cursor.x, self.grid.cursor.y);
              }
             
-            // Stop all sounds (P key)
+            // Stop all sounds and toggle ball movement (P key)
             if self.input.key_pressed(VirtualKeyCode::P) {
                 self.audio_engine.stop_all();
-                self.grid.log_to_console("All sounds stopped".to_string());
+                self.grid.toggle_all_balls();
+                let any_active = self.grid.balls.iter().any(|ball| ball.active);
+                if any_active {
+                    self.grid.log_to_console("Balls started (state saved)".to_string());
+                } else {
+                    self.grid.log_to_console("Balls reset to saved state".to_string());
+                }
             }
             
             // Cell clearing
