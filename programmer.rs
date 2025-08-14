@@ -11,6 +11,7 @@ pub struct ProgrammerState {
     pub ball_color_square_hits: HashMap<(String, usize, usize), u32>, // Track hits per ball color per square
     pub slice_arrays: HashMap<(usize, usize), Vec<u32>>, // Track slice arrays per square position
     pub slice_hit_indices: HashMap<(usize, usize), usize>, // Track current index in slice array per square
+    pub ball_object_hit_counts: HashMap<String, u32>, // Track hits per ball object (ball1, ball2, etc.)
 }
 
 impl Default for ProgrammerState {
@@ -22,6 +23,7 @@ impl Default for ProgrammerState {
             ball_color_square_hits: HashMap::new(),
             slice_arrays: HashMap::new(),
             slice_hit_indices: HashMap::new(),
+            ball_object_hit_counts: HashMap::new(),
         }
     }
 }
@@ -366,14 +368,14 @@ impl SimpleProgramParser {
     }
     
     fn parse_if_condition(&self, line: &str) -> Result<Expression, String> {
-        // Parse "if c_red hits self 10 times" or general expressions
+        // Parse "if c_red hits self 10 times" or "if ball1 hits ball2 4 times" or general expressions
         let condition_part = &line[3..].trim(); // Remove "if "
         
-        // First try to parse the traditional "color hits target count times" format
+        // First try to parse the traditional "object hits target count times" format
         let parts: Vec<&str> = condition_part.split_whitespace().collect();
         if parts.len() >= 5 && parts[1] == "hits" && parts[4] == "times" {
-            let color = parts[0];
-            let target = parts[2]; // "self" or "sq(x,y)"
+            let object_ref = parts[0]; // Could be color (c_red) or ball object (ball1)
+            let target = parts[2]; // "self", "sq(x,y)", or ball object (ball2)
             let count_str = parts[3];
             
             // Handle modulo operations in the count part
@@ -382,7 +384,8 @@ impl SimpleProgramParser {
                 let modulo_parts: Vec<&str> = count_str.split('/').collect();
                 if modulo_parts.len() == 2 {
                     if let Ok(divisor) = modulo_parts[1].trim().parse::<f32>() {
-                        let _validated_color = self.validate_color(color)?;
+                        // Validate the object reference (color or ball object)
+                        self.validate_object_reference(object_ref)?;
                         
                         // Create condition: hit_count % divisor == 0
                         return Ok(Expression::BinaryOp {
@@ -397,7 +400,7 @@ impl SimpleProgramParser {
                     }
                 }
             } else if let Ok(count) = count_str.parse::<u32>() {
-                return self.create_hit_condition(color, target, count);
+                return self.create_hit_condition(object_ref, target, count);
             }
         }
         
@@ -455,15 +458,52 @@ impl SimpleProgramParser {
         Err(format!("Unknown instruction: {}", line))
     }
     
-    fn create_hit_condition(&self, color: &str, _target: &str, count: u32) -> Result<Expression, String> {
-        // Validate the color first
-        let _validated_color = self.validate_color(color)?;
+    fn validate_object_reference(&self, object_ref: &str) -> Result<String, String> {
+        // Check if it's a ball object reference (ball1, ball2, etc.)
+        if object_ref.starts_with("ball") && object_ref[4..].chars().all(|c| c.is_ascii_digit()) {
+            return Ok(object_ref.to_string());
+        }
         
-        // Create a condition that checks ball hit count for the specific color
-        // Note: This still uses the general hit count for now, but the color validation ensures
-        // only valid colors are accepted in the program syntax
+        // Check if it's a color reference (c_red, Red, etc.)
+        if object_ref.starts_with("c_") || Self::VALID_COLORS.contains(&object_ref) {
+            return self.validate_color(object_ref);
+        }
+        
+        Err(format!("Invalid object reference '{}'. Use ball objects (ball1, ball2, etc.) or colors (c_red, Red, etc.)", object_ref))
+    }
+    
+    fn create_hit_condition(&self, object_ref: &str, target: &str, count: u32) -> Result<Expression, String> {
+        // Validate the object reference first
+        let validated_ref = self.validate_object_reference(object_ref)?;
+        
+        // Validate the target as well
+        let validated_target = if target == "self" {
+            "self".to_string()
+        } else if target.starts_with("ball") && target[4..].chars().all(|c| c.is_ascii_digit()) {
+            target.to_string()
+        } else if target.starts_with("square(") && target.ends_with(")") {
+            target.to_string()
+        } else {
+            return Err(format!("Invalid target '{}'. Use 'self', ball objects (ball1, ball2, etc.), or square coordinates square(x, y)", target));
+        };
+        
+        // Create a condition that checks hit count for the specific object and target combination
+        // This creates a variable name that tracks hits between specific objects
+        let hit_variable = if object_ref.starts_with("ball") {
+            if target == "self" {
+                format!("__ball_hits_{}_{}", validated_ref, "self")
+            } else if target.starts_with("ball") {
+                format!("__ball_hits_{}_{}", validated_ref, validated_target)
+            } else {
+                format!("__ball_hits_{}_{}", validated_ref, validated_target)
+            }
+        } else {
+            // Color-based reference (existing behavior)
+            format!("__ball_hits_{}", validated_ref)
+        };
+        
         Ok(Expression::BinaryOp {
-            left: Box::new(Expression::BallProperty(BallProperty::HitCount)),
+            left: Box::new(Expression::Variable(hit_variable)),
             op: BinaryOperator::Equal,
             right: Box::new(Expression::Literal(Value::Number(count as f32))),
         })
@@ -1155,6 +1195,9 @@ impl ProgramExecutor {
         self.state.ball_hit_counts.clear();
         self.state.square_hit_counts.clear();
         self.state.ball_color_square_hits.clear();
+        self.state.ball_object_hit_counts.clear();
+        self.state.slice_arrays.clear();
+        self.state.slice_hit_indices.clear();
     }
     
     pub fn reset_variables(&mut self) {
@@ -1182,10 +1225,16 @@ impl ProgramExecutor {
         let ball_color_square_key = (ball_color.clone(), square_x, square_y);
         *self.state.ball_color_square_hits.entry(ball_color_square_key.clone()).or_insert(0) += 1;
         
+        // Update ball object hit counts using the actual ball.id
+        let ball_self_key = format!("__ball_hits_{}_self", ball.id);
+        *self.state.ball_object_hit_counts.entry(ball_self_key).or_insert(0) += 1;
+        
         // Debug logging
         let ball_hits = *self.state.ball_hit_counts.get(&ball_color).unwrap();
         let square_hits = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
-        println!("DEBUG: Ball color {:?} hits: {}, Square ({},{}) hits: {}", ball_color, ball_hits, square_x, square_y, square_hits);
+        let ball_self_hits = *self.state.ball_object_hit_counts.get(&format!("__ball_hits_{}_self", ball.id)).unwrap_or(&0);
+        println!("DEBUG: Ball {} (color {:?}) hits: {}, Square ({},{}) hits: {}, Ball self hits: {}", 
+            ball.id, ball_color, ball_hits, square_x, square_y, square_hits, ball_self_hits);
         
         // Create execution context with the updated hit counts
         let current_ball_hit_count = *self.state.ball_color_square_hits.get(&ball_color_square_key).unwrap();
@@ -1469,13 +1518,19 @@ impl ProgramExecutor {
                 }
                 
                 if name.starts_with("__ball_hits_c_") {
-                    // Return hits for specific ball color (global)
-                    let color = &name[14..]; // Remove "__ball_hits_c_" prefix
-                    let hits = self.state.ball_hit_counts.get(color).unwrap_or(&0);
-                    return Value::Number(*hits as f32);
-                }
-                
-                if name.starts_with("__square_hits_") {
+                // Return hits for specific ball color (global)
+                let color = &name[14..]; // Remove "__ball_hits_c_" prefix
+                let hits = self.state.ball_hit_counts.get(color).unwrap_or(&0);
+                return Value::Number(*hits as f32);
+            }
+            
+            if name.starts_with("__ball_hits_ball") {
+                // Return hits for specific ball object (ball1, ball2, etc.)
+                let hits = self.state.ball_object_hit_counts.get(name).unwrap_or(&0);
+                return Value::Number(*hits as f32);
+            }
+            
+            if name.starts_with("__square_hits_") {
                     // Return hits for specific square coordinates
                     let coords_str = &name[15..]; // Remove "__square_hits_" prefix
                     if let Some(underscore_pos) = coords_str.find('_') {

@@ -574,8 +574,7 @@ fn draw_ball_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_optio
     draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
     
     // Draw ball name and color at the top
-    let ball_name = format!("Ball {}", ball_index);
-    let ball_info = format!("{} ({})", ball_name, ball.color);
+    let ball_info = format!("{} ({})", ball.id, ball.color);
     draw_text(frame, &ball_info, menu_x + 5, menu_y + 5, [255, 255, 255], false);
     
     // Draw separator line
