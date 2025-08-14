@@ -1,4 +1,4 @@
-use winit::keyboard::KeyCode;
+use winit::event::VirtualKeyCode;
 use winit_input_helper::WinitInputHelper;
 use crate::square::{LibraryManager, Program, Cell};
 use crate::program_editor::{ProgramEditor, ProgramEditorAction};
@@ -9,6 +9,18 @@ use std::time::{Duration, Instant};
 pub enum ProgramSource {
     Library { library_name: String },
     Square { x: usize, y: usize, program_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SampleSource {
+    Auto,
+    Library { library_name: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct SampleEntry {
+    pub name: String,
+    pub source: SampleSource,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +39,7 @@ pub enum LibraryGuiState {
         selected_item: usize,
         scroll_offset: usize,
         editing_mode: Option<EditingMode>,
+        target_square: Option<(usize, usize)>, // Add this field to track target square
     },
 }
 
@@ -66,8 +79,11 @@ pub enum LibraryGuiAction {
     EditProgram { source: ProgramSource, name: String, program: Program, raw_text: Vec<String> },
     OpenSquareScript { x: usize, y: usize, program_index: usize },
     LoadSample { library_name: String },
+    LoadAutoSample,
     SaveProgramToFile { editor: ProgramEditor },
     LoadProgramFromFile,
+    OpenAudioPlayer { library_name: String, sample_name: String },
+    LoadProgramToSquare { program: Program, square_x: usize, square_y: usize },
 }
 
 const LIBRARY_GUI_WIDTH: usize = 580;
@@ -102,9 +118,24 @@ impl LibraryGui {
                 selected_item: 0,
                 scroll_offset: 0,
                 editing_mode: None,
+                target_square: None, // No target square when opened normally
             },
             LibraryGuiState::Visible { .. } => LibraryGuiState::Hidden,
         };
+    }
+
+    // Add this new method for opening with Programs column selected
+    pub fn open_for_program_selection(&mut self, square_x: usize, square_y: usize) {
+        self.state = LibraryGuiState::Visible {
+            selected_column: LibraryColumn::Programs,
+            selected_library: "lib".to_string(),
+            selected_item: 0,
+            scroll_offset: 0,
+            editing_mode: None, // Ensure we're not in editing mode
+            target_square: Some((square_x, square_y)), // Store the target square
+        };
+        // Add debug logging
+        println!("Library GUI opened for program selection at square ({}, {})", square_x, square_y);
     }
 
     pub fn is_visible(&self) -> bool {
@@ -133,20 +164,26 @@ impl LibraryGui {
 
     pub fn handle_input(&mut self, input: &WinitInputHelper, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Option<LibraryGuiAction> {
         // Extract state to avoid borrowing conflicts
-        let (mut selected_column, mut selected_library, mut selected_item, mut scroll_offset, mut editing_mode) = 
+        let (mut selected_column, mut selected_library, mut selected_item, mut scroll_offset, mut editing_mode, mut target_square) = 
             if let LibraryGuiState::Visible { 
                 selected_column, 
                 selected_library, 
                 selected_item, 
                 scroll_offset,
-                editing_mode 
+                editing_mode,
+                target_square
             } = &self.state {
-                (selected_column.clone(), selected_library.clone(), *selected_item, *scroll_offset, editing_mode.clone())
+                (selected_column.clone(), selected_library.clone(), *selected_item, *scroll_offset, editing_mode.clone(), *target_square)
             } else {
                 return None;
             };
             
-        // Handle editing mode input
+        // If opened from square menu (target_square is Some), don't allow editing mode
+        if target_square.is_some() && editing_mode.is_some() {
+            editing_mode = None;
+        }
+            
+        // Handle editing mode input ONLY if we're actually in editing mode
         if let Some(ref mut edit_mode) = editing_mode {
             let result = self.handle_editing_input(input, edit_mode, &selected_library);
             // Update state - but don't overwrite editing_mode if it was set to None by handle_editing_input
@@ -162,18 +199,24 @@ impl LibraryGui {
                 selected_item,
                 scroll_offset,
                 editing_mode,
+                target_square,
             };
             return result;
         }
 
+        // Add debug output for navigation
+        if input.key_pressed(VirtualKeyCode::Up) || input.key_pressed(VirtualKeyCode::Down) {
+            println!("Navigation key pressed, current item: {}, target_square: {:?}", selected_item, target_square);
+        }
+
         // Handle escape key to close library when not in editing mode
-        if input.key_pressed(KeyCode::Escape) {
+        if input.key_pressed(VirtualKeyCode::Escape) {
             self.state = LibraryGuiState::Hidden;
             return None;
         }
 
         // Navigation between columns
-        if input.key_pressed(KeyCode::Tab) {
+        if input.key_pressed(VirtualKeyCode::Tab) {
             selected_column = match selected_column {
                 LibraryColumn::Samples => LibraryColumn::Programs,
                 LibraryColumn::Programs => LibraryColumn::Samples,
@@ -183,11 +226,11 @@ impl LibraryGui {
         }
 
         // Library switching with Left/Right arrows
-        if input.key_pressed(KeyCode::ArrowLeft) || input.key_pressed(KeyCode::ArrowRight) {
+        if input.key_pressed(VirtualKeyCode::Left) || input.key_pressed(VirtualKeyCode::Right) {
             let available_libraries: Vec<String> = library_manager.function_libraries.keys().cloned().collect();
             if !available_libraries.is_empty() {
                 let current_index = available_libraries.iter().position(|lib| lib == &selected_library).unwrap_or(0);
-                let new_index = if input.key_pressed(KeyCode::ArrowLeft) {
+                let new_index = if input.key_pressed(VirtualKeyCode::Left) {
                     if current_index == 0 { available_libraries.len() - 1 } else { current_index - 1 }
                 } else {
                     (current_index + 1) % available_libraries.len()
@@ -199,7 +242,7 @@ impl LibraryGui {
         }
 
         // Navigation within column
-        if input.key_pressed(KeyCode::ArrowUp) {
+        if input.key_pressed(VirtualKeyCode::Up) {
             if selected_item > 0 {
                 selected_item -= 1;
                 if selected_item < scroll_offset {
@@ -208,7 +251,7 @@ impl LibraryGui {
             }
         }
 
-        if input.key_pressed(KeyCode::ArrowDown) {
+        if input.key_pressed(VirtualKeyCode::Down) {
             let max_items = self.get_item_count(library_manager, &selected_column, &selected_library, grid);
             if selected_item + 1 < max_items {
                 selected_item += 1;
@@ -219,7 +262,7 @@ impl LibraryGui {
         }
 
         // Actions
-        if input.key_pressed(KeyCode::F2) { // Rename
+        if input.key_pressed(VirtualKeyCode::F2) { // Rename
             if let Some(item_name) = self.get_selected_item_name(library_manager, &selected_column, &selected_library, selected_item, grid) {
                 editing_mode = Some(EditingMode::RenameItem {
                     original_name: item_name.clone(),
@@ -229,7 +272,7 @@ impl LibraryGui {
         }
 
         let mut result = None;
-        if input.key_pressed(KeyCode::Delete) { // Delete
+        if input.key_pressed(VirtualKeyCode::Delete) { // Delete
             if let Some(item_name) = self.get_selected_item_name(library_manager, &selected_column, &selected_library, selected_item, grid) {
                 result = Some(LibraryGuiAction::DeleteItem {
                     library_name: selected_library.clone(),
@@ -239,43 +282,40 @@ impl LibraryGui {
             }
         }
 
-        if input.held_shift() && input.key_pressed(KeyCode::Space) { // Create new program or load sample
-            match selected_column {
-                LibraryColumn::Programs => {
-                    let initial_text = vec!["def new_program".to_string(), "".to_string()];
-                    editing_mode = Some(EditingMode::CreateProgram {
-                        name: "new_program".to_string(),
-                        editor: ProgramEditor::new_with_text(initial_text),
-                    });
-                }
-                LibraryColumn::Samples => {
-                    // Load sample
-                    result = Some(LibraryGuiAction::LoadSample {
-                        library_name: selected_library.clone(),
-                    });
-                }
-            }
-        }
-
-        if input.key_pressed(KeyCode::Enter) { // Open program
-            if matches!(selected_column, LibraryColumn::Programs) {
-                let all_programs = self.collect_all_programs(library_manager, grid);
-                if let Some(program_entry) = all_programs.get(selected_item) {
-                    // For both square and library programs, use the editing mode
-                    let script = self.program_to_source_code(&program_entry.program);
-                    editing_mode = Some(EditingMode::EditProgram {
-                        name: program_entry.name.clone(),
-                        source: program_entry.source.clone(),
-                        editor: ProgramEditor::new_with_text(script),
-                    });
+        if input.held_shift() && input.key_pressed(VirtualKeyCode::Space) { // Create new program or load sample
+            // Only allow creating new programs when NOT opened from square menu
+            if target_square.is_none() {
+                match selected_column {
+                    LibraryColumn::Programs => {
+                        let initial_text = vec!["def new_program".to_string(), "".to_string()];
+                        editing_mode = Some(EditingMode::CreateProgram {
+                            name: "new_program".to_string(),
+                            editor: ProgramEditor::new_with_text(initial_text),
+                        });
+                    }
+                    LibraryColumn::Samples => {
+                        // Check if the selected sample is auto or library
+                        let all_samples = self.collect_all_samples(library_manager, &selected_library);
+                        if let Some(sample_entry) = all_samples.get(selected_item) {
+                            match &sample_entry.source {
+                                SampleSource::Auto => {
+                                    result = Some(LibraryGuiAction::LoadAutoSample);
+                                },
+                                SampleSource::Library { library_name } => {
+                                    result = Some(LibraryGuiAction::LoadSample {
+                                        library_name: library_name.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        if input.key_pressed(KeyCode::Space) && !input.held_shift() {
+        if input.key_pressed(VirtualKeyCode::Return) { // Open program or audio player
             match selected_column {
                 LibraryColumn::Programs => {
-                    // Open existing program
                     let all_programs = self.collect_all_programs(library_manager, grid);
                     if let Some(program_entry) = all_programs.get(selected_item) {
                         // For both square and library programs, use the editing mode
@@ -285,6 +325,63 @@ impl LibraryGui {
                             source: program_entry.source.clone(),
                             editor: ProgramEditor::new_with_text(script),
                         });
+                    }
+                }
+                LibraryColumn::Samples => {
+                    // Open audio player for .wav files
+                    let all_samples = self.collect_all_samples(library_manager, &selected_library);
+                    if let Some(sample_entry) = all_samples.get(selected_item) {
+                        // Check if the original name (without suffix) ends with .wav
+                        let original_name = if sample_entry.name.contains(" (") {
+                            sample_entry.name.split(" (").next().unwrap_or(&sample_entry.name)
+                        } else {
+                            &sample_entry.name
+                        };
+                        
+                        if original_name.ends_with(".wav") {
+                            // Use the correct library name based on the sample source
+                            let library_name = match &sample_entry.source {
+                                SampleSource::Auto => "auto".to_string(),
+                                SampleSource::Library { library_name } => library_name.clone(),
+                            };
+                            
+                            result = Some(LibraryGuiAction::OpenAudioPlayer {
+                                library_name,
+                                sample_name: original_name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if input.key_pressed(VirtualKeyCode::Space) && !input.held_shift() {
+            match selected_column {
+                LibraryColumn::Programs => {
+                    let all_programs = self.collect_all_programs(library_manager, grid);
+                    if let Some(program_entry) = all_programs.get(selected_item) {
+                        // Check if we have a target square (opened from square menu)
+                        println!("Space pressed on program: {}, target_square: {:?}", program_entry.name, target_square);
+                        if let Some((square_x, square_y)) = target_square {
+                            // Load program into the target square and close library
+                            println!("Loading program '{}' into square ({}, {})", program_entry.name, square_x, square_y);
+                            result = Some(LibraryGuiAction::LoadProgramToSquare {
+                                program: program_entry.program.clone(),
+                                square_x,
+                                square_y,
+                            });
+                            // Close the library GUI
+                            self.state = LibraryGuiState::Hidden;
+                        } else {
+                            // Normal behavior - open for editing
+                            println!("Opening program '{}' for editing", program_entry.name);
+                            let script = self.program_to_source_code(&program_entry.program);
+                            editing_mode = Some(EditingMode::EditProgram {
+                                name: program_entry.name.clone(),
+                                source: program_entry.source.clone(),
+                                editor: ProgramEditor::new_with_text(script),
+                            });
+                        }
                     }
                 }
                 LibraryColumn::Samples => {
@@ -303,6 +400,7 @@ impl LibraryGui {
             selected_item,
             scroll_offset,
             editing_mode,
+            target_square,
         };
         
         result
@@ -312,7 +410,7 @@ impl LibraryGui {
         match edit_mode {
             EditingMode::RenameItem { original_name, new_name } => {
                 // Handle text input for renaming
-                if input.key_pressed(KeyCode::Enter) {
+                if input.key_pressed(VirtualKeyCode::Return) {
                     let action = Some(LibraryGuiAction::RenameItem {
                         library_name: selected_library.to_string(),
                         old_name: original_name.clone(),
@@ -324,7 +422,7 @@ impl LibraryGui {
                     }
                     return action;
                 }
-                if input.key_pressed(KeyCode::Escape) {
+                if input.key_pressed(VirtualKeyCode::Escape) {
                     if let LibraryGuiState::Visible { editing_mode, .. } = &mut self.state {
                         *editing_mode = None;
                     }
@@ -370,6 +468,9 @@ impl LibraryGui {
                     },
                     ProgramEditorAction::LoadFromFile => {
                         return Some(LibraryGuiAction::LoadProgramFromFile);
+                    },
+                    ProgramEditorAction::OpenLibrary => {
+                        // This shouldn't happen in library GUI context, just ignore
                     },
                     ProgramEditorAction::None => {
                         // Do nothing
@@ -420,6 +521,9 @@ impl LibraryGui {
                     ProgramEditorAction::LoadFromFile => {
                         return Some(LibraryGuiAction::LoadProgramFromFile);
                     },
+                    ProgramEditorAction::OpenLibrary => {
+                        // This shouldn't happen in library GUI context, just ignore
+                    },
                     ProgramEditorAction::None => {
                         // Do nothing
                     }
@@ -431,7 +535,7 @@ impl LibraryGui {
     
 
     
-    fn should_handle_key_repeat(&mut self, input: &WinitInputHelper, key: KeyCode) -> bool {
+    fn should_handle_key_repeat(&mut self, input: &WinitInputHelper, key: VirtualKeyCode) -> bool {
         let now = Instant::now();
         
         // Check if key is currently pressed
@@ -465,10 +569,7 @@ impl LibraryGui {
     fn get_item_count(&self, library_manager: &LibraryManager, column: &LibraryColumn, library_name: &str, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> usize {
         match column {
             LibraryColumn::Samples => {
-                library_manager.sample_libraries
-                    .get(library_name)
-                    .map(|lib| lib.samples.len())
-                    .unwrap_or(0)
+                self.collect_all_samples(library_manager, library_name).len()
             },
             LibraryColumn::Programs => {
                 self.collect_all_programs(library_manager, grid).len()
@@ -479,12 +580,8 @@ impl LibraryGui {
     fn get_selected_item_name(&self, library_manager: &LibraryManager, column: &LibraryColumn, library_name: &str, index: usize, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Option<String> {
         match column {
             LibraryColumn::Samples => {
-                library_manager.sample_libraries
-                    .get(library_name)?
-                    .samples
-                    .keys()
-                    .nth(index)
-                    .cloned()
+                let all_samples = self.collect_all_samples(library_manager, library_name);
+                all_samples.get(index).map(|entry| entry.name.clone())
             },
             LibraryColumn::Programs => {
                 let all_programs = self.collect_all_programs(library_manager, grid);
@@ -500,6 +597,34 @@ impl LibraryGui {
                 })
             },
         }
+    }
+
+    fn collect_all_samples(&self, library_manager: &LibraryManager, selected_library: &str) -> Vec<SampleEntry> {
+        let mut all_samples = Vec::new();
+        
+        // Add auto samples first
+        if let Some(auto_library) = library_manager.sample_libraries.get("auto") {
+            for (name, _sample) in &auto_library.samples {
+                all_samples.push(SampleEntry {
+                    name: format!("{} (auto)", name),
+                    source: SampleSource::Auto,
+                });
+            }
+        }
+        
+        // Add library samples if it's not the auto library
+        if selected_library != "auto" {
+            if let Some(library) = library_manager.sample_libraries.get(selected_library) {
+                for (name, _sample) in &library.samples {
+                    all_samples.push(SampleEntry {
+                        name: format!("{} ({})", name, selected_library),
+                        source: SampleSource::Library { library_name: selected_library.to_string() },
+                    });
+                }
+            }
+        }
+        
+        all_samples
     }
 
     fn collect_all_programs(&self, library_manager: &LibraryManager, grid: &[[Cell; crate::sequencer::GRID_WIDTH]; crate::sequencer::GRID_HEIGHT]) -> Vec<ProgramEntry> {
@@ -699,7 +824,8 @@ impl LibraryGui {
             selected_library, 
             selected_item, 
             scroll_offset,
-            editing_mode 
+            editing_mode,
+            target_square
         } = &self.state {
             
             // Calculate position (center of screen)
@@ -877,41 +1003,43 @@ impl LibraryGui {
     fn draw_sample_column(&self, frame: &mut [u8], x: usize, y: usize, library_manager: &LibraryManager, 
                          selected_library: &str, selected_column: &LibraryColumn, 
                          selected_item: usize, scroll_offset: usize, window_width: usize) {
-        if let Some(library) = library_manager.sample_libraries.get(selected_library) {
-            let start_y = y + HEADER_HEIGHT + 5;
-            let is_column_selected = matches!(selected_column, LibraryColumn::Samples);
+        let all_samples = self.collect_all_samples(library_manager, selected_library);
+        let start_y = y + HEADER_HEIGHT + 5;
+        let is_column_selected = matches!(selected_column, LibraryColumn::Samples);
+        
+        for (i, sample_entry) in all_samples.iter().enumerate().skip(scroll_offset).take(MAX_VISIBLE_ITEMS) {
+            let item_y = start_y + (i - scroll_offset) * ITEM_HEIGHT;
+            let is_selected = is_column_selected && (i) == selected_item;
             
-            for (i, (name, _sample)) in library.samples.iter().enumerate().skip(scroll_offset).take(MAX_VISIBLE_ITEMS) {
-                let item_y = start_y + i * ITEM_HEIGHT;
-                let is_selected = is_column_selected && (i + scroll_offset) == selected_item;
-                
-                // Draw selection background
-                if is_selected {
-                    for dx in 0..(COLUMN_WIDTH - 10) {
-                        for dy in 0..(ITEM_HEIGHT - 2) {
-                            let px = x + 8 + dx;
-                            let py = item_y - 2 + dy;
-                            if px < window_width && py < frame.len() / (window_width * 4) {
-                                let idx = (py * window_width + px) * 4;
-                                if idx + 3 < frame.len() {
-                                    frame[idx] = frame[idx].saturating_add(25);
-                                    frame[idx + 1] = frame[idx + 1].saturating_add(25);
-                                    frame[idx + 2] = frame[idx + 2].saturating_add(35);
-                                }
+            // Draw selection background
+            if is_selected {
+                for dx in 0..(COLUMN_WIDTH - 10) {
+                    for dy in 0..(ITEM_HEIGHT - 2) {
+                        let px = x + 8 + dx;
+                        let py = item_y - 2 + dy;
+                        if px < window_width && py < frame.len() / (window_width * 4) {
+                            let idx = (py * window_width + px) * 4;
+                            if idx + 3 < frame.len() {
+                                frame[idx] = frame[idx].saturating_add(25);
+                                frame[idx + 1] = frame[idx + 1].saturating_add(25);
+                                frame[idx + 2] = frame[idx + 2].saturating_add(35);
                             }
                         }
                     }
                 }
-                
-                // Draw sample icon
-                font::draw_text(frame, "♪", x + 15, item_y, 
-                              if is_selected { [100, 200, 255] } else { [120, 120, 150] }, 
-                              false, window_width);
-                
-                self.draw_text(frame, name, x + 30, item_y, 
-                              if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
-                              is_selected, window_width);
             }
+            
+            // Draw sample icon with different colors for auto vs library samples
+            let icon_color = match &sample_entry.source {
+                SampleSource::Auto => if is_selected { [255, 150, 100] } else { [180, 120, 80] },
+                SampleSource::Library { .. } => if is_selected { [100, 200, 255] } else { [120, 120, 150] },
+            };
+            
+            font::draw_text(frame, "♪", x + 15, item_y, icon_color, false, window_width);
+            
+            self.draw_text(frame, &sample_entry.name, x + 30, item_y, 
+                          if is_selected { [255, 255, 100] } else { [220, 220, 220] }, 
+                          is_selected, window_width);
         }
     }
 
