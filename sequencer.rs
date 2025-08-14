@@ -55,7 +55,7 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new() -> Self {
-        Self { x: 0, y: 0 }
+        Self { x: 7, y: 5 }
     }
     
     pub fn move_up(&mut self) {
@@ -2143,9 +2143,10 @@ impl SequencerUI {
                  self.grid.place_ball(self.grid.cursor.x, self.grid.cursor.y);
              }
             
-            // Toggle ball movement (P key)
+            // Stop all sounds (P key)
             if self.input.key_pressed(VirtualKeyCode::P) {
-                self.grid.toggle_all_balls();
+                self.audio_engine.stop_all();
+                self.grid.log_to_console("All sounds stopped".to_string());
             }
             
             // Cell clearing
@@ -2691,7 +2692,7 @@ impl SequencerUI {
         let default_filename = format!("{}.cant", program_name);
         
         if let Some(file_path) = FileDialog::new()
-            .add_filter("Canticlec Programs", &["cant"])
+            .add_filter("Canticle Programs", &["cant"])
             .set_title("Save Program")
             .set_file_name(&default_filename)
             .save_file()
@@ -2712,7 +2713,7 @@ impl SequencerUI {
 
     fn load_program_from_file(&mut self) {
         if let Some(file_path) = FileDialog::new()
-            .add_filter("Canticlec Programs", &["cant"])
+            .add_filter("Canticle Programs", &["cant"])
             .set_title("Load Program")
             .pick_file()
         {
@@ -2749,7 +2750,7 @@ pub async fn run_sequencer(audio_engine: AudioEngine) -> Result<(), Error> {
     let window = {
         let size = LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64);
         WindowBuilder::new()
-            .with_title("Canticlec Churn - Music Sequencer")
+            .with_title("Canticle")
             .with_inner_size(size)
             .with_min_inner_size(size)
             .build(&event_loop)
