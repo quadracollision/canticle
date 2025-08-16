@@ -2059,10 +2059,46 @@ impl SequencerUI {
                         LibraryGuiAction::EditProgram { source, name, program, raw_text } => {
                             // Create a program with the raw text preserved
                             let mut updated_program = program;
-                            updated_program.source_text = Some(raw_text);
+                            updated_program.source_text = Some(raw_text.clone());
                             
                             // Store the program name before any moves occur
                             let updated_program_name = updated_program.name.clone();
+                            
+                            // Helper function to validate if program has valid def statement
+                            let has_valid_def = |text: &Vec<String>| -> bool {
+                                for line in text {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with("def ") {
+                                        let name_part = trimmed.strip_prefix("def ").unwrap_or("").trim();
+                                        return !name_part.is_empty();
+                                    }
+                                }
+                                false
+                            };
+                            
+                            // Check if the program should be deleted (no valid def statement)
+                            if !has_valid_def(&raw_text) {
+                                match source {
+                                    crate::library_gui::ProgramSource::Library { library_name } => {
+                                        // Remove program from library
+                                        if let Some(lib) = self.grid.library_manager.function_libraries.get_mut(&library_name) {
+                                            lib.functions.remove(&name);
+                                            self.grid.log_to_console(format!("Removed program '{}' from library '{}' (no valid def statement)", name, library_name));
+                                        }
+                                    },
+                                    crate::library_gui::ProgramSource::Square { x, y, program_index } => {
+                                        // For squares, we don't remove the program entirely, just log a warning
+                                        // since squares need to maintain their program structure
+                                        self.grid.log_to_console(format!("Warning: Program '{}' in square ({}, {}) has no valid def statement", name, x, y));
+                                        if x < crate::sequencer::GRID_WIDTH && y < crate::sequencer::GRID_HEIGHT {
+                                            if let Some(square_program) = self.grid.cells[y][x].program.programs.get_mut(program_index) {
+                                                *square_program = updated_program;
+                                            }
+                                        }
+                                    },
+                                }
+                                return; // Exit early, don't process further
+                            }
                             
                             match source {
                                 crate::library_gui::ProgramSource::Library { library_name } => {
