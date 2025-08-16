@@ -2061,12 +2061,24 @@ impl SequencerUI {
                             let mut updated_program = program;
                             updated_program.source_text = Some(raw_text);
                             
+                            // Store the program name before any moves occur
+                            let updated_program_name = updated_program.name.clone();
+                            
                             match source {
                                 crate::library_gui::ProgramSource::Library { library_name } => {
                                     // Update program in library
                                     if let Some(lib) = self.grid.library_manager.function_libraries.get_mut(&library_name) {
-                                        lib.functions.insert(name.clone(), updated_program);
-                                        self.grid.log_to_console(format!("Updated program '{}' in library '{}'", name, library_name));
+                                        // Check if the program name has changed
+                                        if name != updated_program_name {
+                                            // Remove the old entry and add with new name
+                                            lib.functions.remove(&name);
+                                            lib.functions.insert(updated_program_name.clone(), updated_program);
+                                            self.grid.log_to_console(format!("Renamed and updated program '{}' to '{}' in library '{}'", name, updated_program_name, library_name));
+                                        } else {
+                                            // Just update the existing entry
+                                            lib.functions.insert(name.clone(), updated_program);
+                                            self.grid.log_to_console(format!("Updated program '{}' in library '{}'", name, library_name));
+                                        }
                                     }
                                 },
                                 crate::library_gui::ProgramSource::Square { x, y, program_index } => {
@@ -2074,7 +2086,7 @@ impl SequencerUI {
                                     if x < crate::sequencer::GRID_WIDTH && y < crate::sequencer::GRID_HEIGHT {
                                         if let Some(square_program) = self.grid.cells[y][x].program.programs.get_mut(program_index) {
                                             *square_program = updated_program;
-                                            self.grid.log_to_console(format!("Updated program '{}' in square ({}, {})", name, x, y));
+                                            self.grid.log_to_console(format!("Updated program '{}' in square ({}, {})", updated_program_name, x, y));
                                         }
                                     }
                                 },
