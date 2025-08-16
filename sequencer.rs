@@ -17,6 +17,7 @@ use crate::sample_manager::SampleManager;
 use crate::ball_audio::BallAudioSystem;
 use crate::audio_player::{AudioPlayer, AudioPlayerAction};
 use crate::font;
+use crate::renderer::Renderer;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1667,7 +1668,17 @@ impl SequencerGrid {
             let grid_y = y as usize;
             if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
                 if let Some(sample_template) = self.library_manager.get_square_sample(&library_name, &sample_name) {
-                    self.cells[grid_y][grid_x].place_square(Some([255, 100, 100])); // Red square
+                    // Parse color string to RGB array
+                    let color_rgb = if sample_template.color == "red" {
+                        [255, 100, 100]
+                    } else if sample_template.color == "blue" {
+                        [100, 100, 255]
+                    } else if sample_template.color == "green" {
+                        [100, 255, 100]
+                    } else {
+                        [200, 200, 200] // Default gray
+                    };
+                    self.cells[grid_y][grid_x].place_square(Some(color_rgb));
                     if let Some(program_name) = &sample_template.behavior_program {
                         // Look up the actual program from the library
                         if let Some(library_program) = self.library_manager.get_function("lib", program_name) {
@@ -2440,8 +2451,8 @@ impl SequencerUI {
             pixel[3] = 255; // A
         }
         
-        // Draw grid lines
-        Self::draw_grid_lines_static(frame);
+        // Draw grid lines using renderer
+        Renderer::draw_grid_lines(frame);
         
         // Draw cells
         for y in 0..GRID_HEIGHT {
@@ -2469,17 +2480,17 @@ impl SequencerUI {
                         } else {
                             cell.display_text.clone()
                         };
-                        Self::draw_square_static(frame, x, y, cell.color, &display_text);
+                        Renderer::draw_square(frame, x, y, cell.color, &display_text);
                     }
                     CellContent::Empty => {}
                 }
             }
         }
         
-        // Draw balls
+        // Draw balls using renderer
         for ball in &self.grid.balls {
-            let ball_color = Self::get_color_rgb(&ball.color);
-            Self::draw_ball_static(frame, ball.x, ball.y, ball_color);
+            let ball_color = Renderer::get_color_rgb(&ball.color);
+            Renderer::draw_ball(frame, ball.x, ball.y, ball_color);
         }
         
         // Draw context menu if open
@@ -2496,263 +2507,15 @@ impl SequencerUI {
         
         // Draw cursor only when library GUI, audio player, and square menu are not visible
         if !self.grid.library_gui.is_visible() && !self.grid.audio_player.is_visible() && !self.grid.square_menu.is_open() {
-            Self::draw_cursor_static(frame, self.grid.cursor.x, self.grid.cursor.y);
+            Renderer::draw_cursor(frame, self.grid.cursor.x, self.grid.cursor.y);
         }
         
-        // Draw console area
-        Self::draw_console_static(frame, &self.grid.console_messages);
+        // Draw console area using renderer
+        Renderer::draw_console(frame, &self.grid.console_messages);
         
         self.pixels.render()
     }
     
-    fn draw_console_static(frame: &mut [u8], console_messages: &VecDeque<String>) {
-        // Draw console background
-        let console_y_start = GRID_AREA_HEIGHT;
-        for y in console_y_start..WINDOW_HEIGHT {
-            for x in 0..WINDOW_WIDTH {
-                let idx = (y * WINDOW_WIDTH + x) * 4;
-                if idx + 3 < frame.len() {
-                    frame[idx] = 30;     // R - darker background
-                    frame[idx + 1] = 30; // G
-                    frame[idx + 2] = 30; // B
-                    frame[idx + 3] = 255; // A
-                }
-            }
-        }
-        
-        // Draw console border
-        for x in 0..WINDOW_WIDTH {
-            let idx = (console_y_start * WINDOW_WIDTH + x) * 4;
-            if idx + 3 < frame.len() {
-                frame[idx] = 100;     // R - border color
-                frame[idx + 1] = 100; // G
-                frame[idx + 2] = 100; // B
-                frame[idx + 3] = 255; // A
-            }
-        }
-        
-        // Draw console messages
-        for (i, message) in console_messages.iter().enumerate() {
-            let text_y = console_y_start + 10 + i * 14;
-            if text_y + 12 < WINDOW_HEIGHT {
-                Self::draw_menu_text(frame, message, 5, text_y, [200, 200, 200], false);
-            }
-        }
-    }
-    
-    fn draw_cursor_coordinates(frame: &mut [u8], cursor_x: usize, cursor_y: usize) {
-        let coord_text = format!("({}, {})", cursor_x, cursor_y);
-        // Position coordinates in the black area above grid (0,0)
-        // Grid (0,0) starts at pixel (0,0), so we position the text just above it
-        Self::draw_menu_text(frame, &coord_text, 5, 25, [255, 255, 255], false); // White text above grid (0,0)
-    }
-    
-    fn draw_menu_text(frame: &mut [u8], text: &str, x: usize, y: usize, color: [u8; 3], selected: bool) {
-        font::draw_text(frame, text, x, y, color, selected, WINDOW_WIDTH);
-    }
-    
-
-
-    fn draw_grid_lines_static(frame: &mut [u8]) {
-        let grid_color = [60, 60, 60];
-        
-        // Vertical lines
-        for x in 0..=GRID_WIDTH {
-            let pixel_x = x * CELL_SIZE;
-            if pixel_x < WINDOW_WIDTH as usize {
-                for y in 0..WINDOW_HEIGHT as usize {
-                    let index = (y * WINDOW_WIDTH as usize + pixel_x) * 4;
-                    if index + 2 < frame.len() {
-                        frame[index] = grid_color[0];
-                        frame[index + 1] = grid_color[1];
-                        frame[index + 2] = grid_color[2];
-                    }
-                }
-            }
-        }
-        
-        // Horizontal lines
-        for y in 0..=GRID_HEIGHT {
-            let pixel_y = y * CELL_SIZE;
-            if pixel_y < WINDOW_HEIGHT as usize {
-                for x in 0..WINDOW_WIDTH as usize {
-                    let index = (pixel_y * WINDOW_WIDTH as usize + x) * 4;
-                    if index + 2 < frame.len() {
-                        frame[index] = grid_color[0];
-                        frame[index + 1] = grid_color[1];
-                        frame[index + 2] = grid_color[2];
-                    }
-                }
-            }
-        }
-    }
-    
-    fn draw_square_static(frame: &mut [u8], grid_x: usize, grid_y: usize, color: [u8; 3], display_text: &Option<String>) {
-        let start_x = grid_x * CELL_SIZE + 2;
-        let start_y = grid_y * CELL_SIZE + 2;
-        let end_x = (grid_x + 1) * CELL_SIZE - 2;
-        let end_y = (grid_y + 1) * CELL_SIZE - 2;
-        
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                if x < WINDOW_WIDTH as usize && y < WINDOW_HEIGHT as usize {
-                    let index = (y * WINDOW_WIDTH as usize + x) * 4;
-                    if index + 2 < frame.len() {
-                        frame[index] = color[0];
-                        frame[index + 1] = color[1];
-                        frame[index + 2] = color[2];
-                    }
-                }
-            }
-        }
-        
-        // Draw display text if present
-        if let Some(text) = display_text {
-            let text_x = start_x + 4;
-            let text_y = start_y + 4;
-            
-            // Handle multi-line text by splitting on newlines
-            let lines: Vec<&str> = text.split('\n').collect();
-            for (line_index, line) in lines.iter().enumerate() {
-                let line_y = text_y + (line_index * 12); // 12 pixels per line (font height)
-                // Only draw if the line fits within the cell
-                if line_y + 12 <= end_y {
-                    font::draw_text(frame, line, text_x, line_y, [255, 255, 255], false, WINDOW_WIDTH);
-                }
-            }
-        }
-    }
-    
-    fn draw_circle_static(frame: &mut [u8], grid_x: usize, grid_y: usize, color: [u8; 3]) {
-        let center_x = grid_x * CELL_SIZE + CELL_SIZE / 2;
-        let center_y = grid_y * CELL_SIZE + CELL_SIZE / 2;
-        let radius = (CELL_SIZE / 2 - 2) as f32;
-        
-        let start_x = grid_x * CELL_SIZE + 2;
-        let start_y = grid_y * CELL_SIZE + 2;
-        let end_x = (grid_x + 1) * CELL_SIZE - 2;
-        let end_y = (grid_y + 1) * CELL_SIZE - 2;
-        
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                let dx = x as f32 - center_x as f32;
-                let dy = y as f32 - center_y as f32;
-                let distance = (dx * dx + dy * dy).sqrt();
-                
-                if distance <= radius && x < WINDOW_WIDTH as usize && y < WINDOW_HEIGHT as usize {
-                    let index = (y * WINDOW_WIDTH as usize + x) * 4;
-                    if index + 2 < frame.len() {
-                        frame[index] = color[0];
-                        frame[index + 1] = color[1];
-                        frame[index + 2] = color[2];
-                    }
-                }
-            }
-        }
-    }
-    
-    fn draw_cursor_static(frame: &mut [u8], cursor_x: usize, cursor_y: usize) {
-        let cursor_color = [255, 255, 0]; // Yellow cursor
-        let x = cursor_x * CELL_SIZE;
-        let y = cursor_y * CELL_SIZE;
-        
-        // Draw cursor border
-        for i in 0..CELL_SIZE {
-            // Top border
-            if x + i < WINDOW_WIDTH as usize && y < WINDOW_HEIGHT as usize {
-                let index = (y * WINDOW_WIDTH as usize + x + i) * 4;
-                if index + 2 < frame.len() {
-                    frame[index] = cursor_color[0];
-                    frame[index + 1] = cursor_color[1];
-                    frame[index + 2] = cursor_color[2];
-                }
-            }
-            
-            // Bottom border
-            if x + i < WINDOW_WIDTH as usize && y + CELL_SIZE - 1 < WINDOW_HEIGHT as usize {
-                let index = ((y + CELL_SIZE - 1) * WINDOW_WIDTH as usize + x + i) * 4;
-                if index + 2 < frame.len() {
-                    frame[index] = cursor_color[0];
-                    frame[index + 1] = cursor_color[1];
-                    frame[index + 2] = cursor_color[2];
-                }
-            }
-            
-            // Left border
-            if x < WINDOW_WIDTH as usize && y + i < WINDOW_HEIGHT as usize {
-                let index = ((y + i) * WINDOW_WIDTH as usize + x) * 4;
-                if index + 2 < frame.len() {
-                    frame[index] = cursor_color[0];
-                    frame[index + 1] = cursor_color[1];
-                    frame[index + 2] = cursor_color[2];
-                }
-            }
-            
-            // Right border
-            if x + CELL_SIZE - 1 < WINDOW_WIDTH as usize && y + i < WINDOW_HEIGHT as usize {
-                let index = ((y + i) * WINDOW_WIDTH as usize + x + CELL_SIZE - 1) * 4;
-                if index + 2 < frame.len() {
-                    frame[index] = cursor_color[0];
-                    frame[index + 1] = cursor_color[1];
-                    frame[index + 2] = cursor_color[2];
-                }
-            }
-        }
-    }
-    
-    fn get_color_rgb(color_name: &str) -> [u8; 3] {
-        match color_name {
-            "Red" => [255, 0, 0],
-            "Green" => [0, 255, 0],
-            "Blue" => [0, 0, 255],
-            "Yellow" => [255, 255, 0],
-            "Cyan" => [0, 255, 255],
-            "Magenta" => [255, 0, 255],
-            "White" => [255, 255, 255],
-            "Orange" => [255, 165, 0],
-            _ => [255, 255, 255], // Default to white
-        }
-    }
-    
-    fn draw_ball_static(frame: &mut [u8], ball_x: f32, ball_y: f32, color: [u8; 3]) {
-        let pixel_x = ball_x * CELL_SIZE as f32;
-        let pixel_y = ball_y * CELL_SIZE as f32;
-        let center_x = pixel_x;
-        let center_y = pixel_y;
-        let radius = CELL_SIZE as f32 / 4.0;
-        
-        let start_x = (pixel_x as usize).saturating_sub(CELL_SIZE / 2);
-        let start_y = (pixel_y as usize).saturating_sub(CELL_SIZE / 2);
-        let end_x = ((pixel_x + CELL_SIZE as f32) as usize).min(WINDOW_WIDTH);
-        let end_y = ((pixel_y + CELL_SIZE as f32) as usize).min(WINDOW_HEIGHT);
-        
-        // Draw ball with specified color
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
-                    let dx = x as f32 - center_x;
-                    let dy = y as f32 - center_y;
-                    if dx * dx + dy * dy <= radius * radius {
-                        let index = (y * WINDOW_WIDTH + x) * 4;
-                        if index + 3 < frame.len() {
-                            frame[index] = color[0];     // R
-                            frame[index + 1] = color[1]; // G
-                            frame[index + 2] = color[2]; // B
-                            frame[index + 3] = 0xff;     // A
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-
-    
-
-    
-
-    
-
     
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if let Err(err) = self.pixels.resize_surface(new_size.width, new_size.height) {

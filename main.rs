@@ -12,6 +12,7 @@ mod program_editor;
 mod font;
 mod sample_manager;
 mod audio_player;
+mod renderer; // Add the new renderer module
 
 use audio_engine::AudioEngine;
 use sequencer::run_sequencer;
@@ -20,7 +21,7 @@ use sequencer::run_sequencer;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     
-    println!("Starting Canticlec Churn Music Sequencer...");
+    println!("Starting Canticle Music Sequencer...");
     
     // Initialize the audio engine
     let mut audio_engine = AudioEngine::new()?;
