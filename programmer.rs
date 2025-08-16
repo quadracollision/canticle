@@ -59,9 +59,16 @@ impl SimpleProgramParser {
         // Handle both "Red" and "c_red" formats
         let normalized_color = if color.starts_with("c_") {
             let base_color = &color[2..];
+            if base_color.is_empty() {
+                return Err(format!("Invalid color format '{}'. Expected format: c_colorname", color));
+            }
             format!("{}{}", base_color.chars().next().unwrap().to_uppercase(), &base_color[1..].to_lowercase())
         } else {
-            color.to_string()
+            // Normalize non-prefixed colors to proper case (e.g., "blue" -> "Blue")
+            if color.is_empty() {
+                return Err("Color name cannot be empty".to_string());
+            }
+            format!("{}{}", color.chars().next().unwrap().to_uppercase(), &color[1..].to_lowercase())
         };
         
         if Self::VALID_COLORS.contains(&normalized_color.as_str()) {
@@ -465,7 +472,18 @@ impl SimpleProgramParser {
         }
         
         // Check if it's a color reference (c_red, Red, etc.)
-        if object_ref.starts_with("c_") || Self::VALID_COLORS.contains(&object_ref) {
+        if object_ref.starts_with("c_") {
+            return self.validate_color(object_ref);
+        }
+        
+        // Normalize the color name and check if it's valid
+        let normalized_color = if !object_ref.is_empty() {
+            format!("{}{}", object_ref.chars().next().unwrap().to_uppercase(), &object_ref[1..].to_lowercase())
+        } else {
+            object_ref.to_string()
+        };
+        
+        if Self::VALID_COLORS.contains(&normalized_color.as_str()) {
             return self.validate_color(object_ref);
         }
         
@@ -499,8 +517,14 @@ impl SimpleProgramParser {
                 format!("__ball_hits_{}_{}", validated_ref, validated_target)
             }
         } else {
-            // Color-based reference (existing behavior)
-            format!("__ball_hits_{}", validated_ref)
+            // Color-based reference - FIXED: handle 'self' target properly
+            if target == "self" {
+                // For color hitting 'self' (the square), use ball_color_square_hits
+                format!("__ball_color_square_hits_{}", validated_ref)
+            } else {
+                // For color hitting other targets, use global color hits
+                format!("__ball_hits_{}", validated_ref)
+            }
         };
         
         Ok(Expression::BinaryOp {
@@ -605,6 +629,18 @@ impl SimpleProgramParser {
                             }
                         };
                         return Ok(Instruction::SetDirection(direction_expr));
+                    }
+                }
+                "color" => {
+                    if parts.len() >= 3 {
+                        let color_str = parts[2];
+                        
+                        // Validate the color using existing validation method
+                        let validated_color = self.validate_color(color_str)?;
+                        
+                        return Ok(Instruction::SetColor(Expression::Literal(Value::String(validated_color))));
+                    } else {
+                        return Err("Invalid color statement format. Expected: set color <color_name>".to_string());
                     }
                 }
                 "reverse" => {
@@ -1328,6 +1364,11 @@ impl ProgramExecutor {
                         actions.push(ProgramAction::SetVolume(volume));
                     }
                 }
+                Instruction::SetColor(expr) => {
+                    if let Value::String(color) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetColor(color));
+                    }
+                }
                 Instruction::Bounce => {
                     actions.push(ProgramAction::Bounce);
                 }
@@ -1547,9 +1588,10 @@ impl ProgramExecutor {
             
             if name.starts_with("__ball_hits_c_") {
                 // Return hits for specific ball color (global)
-                let color = &name[14..]; // Remove "__ball_hits_c_" prefix
-                let hits = self.state.ball_hit_counts.get(color).unwrap_or(&0);
-                println!("DEBUG: Color hit count for {} = {}", name, hits);
+                let color_part = &name[14..]; // Remove "__ball_hits_c_" prefix
+                let full_color_key = format!("c_{}", color_part); // Add "c_" prefix to match storage format
+                let hits = self.state.ball_hit_counts.get(&full_color_key).unwrap_or(&0);
+                println!("DEBUG: Color hit count for {} (key: {}) = {}", name, full_color_key, hits);
                 return Value::Number(*hits as f32);
             }
             

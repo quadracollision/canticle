@@ -16,7 +16,29 @@ pub struct Renderer;
 
 impl Renderer {
     pub fn get_color_rgb(color_name: &str) -> [u8; 3] {
-        match color_name {
+        // Normalize the color name to handle different formats
+        let normalized_color = if color_name.starts_with("c_") {
+            // Handle c_blue -> Blue format
+            let base_color = &color_name[2..]; // Remove "c_" prefix
+            if !base_color.is_empty() {
+                let mut chars = base_color.chars();
+                match chars.next() {
+                    None => "White".to_string(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            } else {
+                "White".to_string()
+            }
+        } else {
+            // Handle blue -> Blue format (capitalize first letter)
+            let mut chars = color_name.chars();
+            match chars.next() {
+                None => "White".to_string(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        };
+        
+        match normalized_color.as_str() {
             "Red" => [255, 0, 0],
             "Green" => [0, 255, 0],
             "Blue" => [0, 0, 255],

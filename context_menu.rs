@@ -6,7 +6,7 @@ pub enum ContextMenuState {
     None,
     BallMenu { ball_index: usize, selected_option: usize },
     BallDirection { ball_index: usize, selected_option: usize },
-    BallSpeed { ball_index: usize, speed: f32 }, // speed in grid units per second
+    BallSpeed { ball_index: usize, speed: f32, reference_ball_index: Option<usize> }, // speed in grid units per second
     BallRelativeSpeed { ball_index: usize, selected_ball: usize, speed_ratio: f32, category: RatioCategory },
     BallCustomRatio { ball_index: usize, selected_ball: usize, numerator: u32, denominator: u32 },
     BallColor { ball_index: usize, selected_option: usize },
@@ -102,7 +102,11 @@ impl ContextMenu {
     }
     
     pub fn open_speed_menu(&mut self, ball_index: usize, current_speed: f32) {
-        self.state = ContextMenuState::BallSpeed { ball_index, speed: current_speed };
+        self.state = ContextMenuState::BallSpeed { 
+            ball_index, 
+            speed: current_speed, 
+            reference_ball_index: None 
+        };
     }
 
     pub fn close(&mut self) {
@@ -165,7 +169,7 @@ impl ContextMenu {
                         1 => {
                             // Initialize with current ball speed
                             let current_speed = balls.get(ball_index).map(|b| b.speed).unwrap_or(2.0);
-                            self.state = ContextMenuState::BallSpeed { ball_index, speed: current_speed };
+                            self.state = ContextMenuState::BallSpeed { ball_index, speed: current_speed, reference_ball_index: None };
                         },
                         2 => {
                             // Relative Speed - find first other ball or default to ball 0
@@ -221,9 +225,87 @@ impl ContextMenu {
                 }
                 None
             }
-            ContextMenuState::BallSpeed { ball_index, speed } => {
+            ContextMenuState::BallSpeed { ball_index, speed, reference_ball_index } => {
                 if input.key_pressed(VirtualKeyCode::Escape) {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 1 };
+                    return None;
+                }
+                
+                // Handle up/down for reference ball selection
+                if input.key_pressed(VirtualKeyCode::Up) {
+                    let new_ref_index = if let Some(current_ref) = reference_ball_index {
+                        if current_ref > 0 {
+                            Some(current_ref - 1)
+                        } else {
+                            // Wrap to last ball, excluding the current ball being edited
+                            let last_index = balls.len().saturating_sub(1);
+                            if last_index != ball_index {
+                                Some(last_index)
+                            } else if last_index > 0 {
+                                Some(last_index - 1)
+                            } else {
+                                None
+                            }
+                        }
+                    } else {
+                        // Start with first ball that's not the current one
+                        if balls.len() > 1 {
+                            Some(if ball_index == 0 { 1 } else { 0 })
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    // Skip the ball being edited
+                    let final_ref_index = if let Some(ref_idx) = new_ref_index {
+                        if ref_idx == ball_index {
+                            if ref_idx > 0 { Some(ref_idx - 1) } else { Some(ref_idx + 1) }
+                        } else {
+                            Some(ref_idx)
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    self.state = ContextMenuState::BallSpeed { ball_index, speed, reference_ball_index: final_ref_index };
+                    return None;
+                }
+                
+                if input.key_pressed(VirtualKeyCode::Down) {
+                    let new_ref_index = if let Some(current_ref) = reference_ball_index {
+                        if current_ref + 1 < balls.len() {
+                            Some(current_ref + 1)
+                        } else {
+                            // Wrap to first ball, excluding the current ball being edited
+                            if ball_index != 0 {
+                                Some(0)
+                            } else if balls.len() > 1 {
+                                Some(1)
+                            } else {
+                                None
+                            }
+                        }
+                    } else {
+                        // Start with first ball that's not the current one
+                        if balls.len() > 1 {
+                            Some(if ball_index == 0 { 1 } else { 0 })
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    // Skip the ball being edited
+                    let final_ref_index = if let Some(ref_idx) = new_ref_index {
+                        if ref_idx == ball_index {
+                            if ref_idx + 1 < balls.len() { Some(ref_idx + 1) } else { Some(0) }
+                        } else {
+                            Some(ref_idx)
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    self.state = ContextMenuState::BallSpeed { ball_index, speed, reference_ball_index: final_ref_index };
                     return None;
                 }
                 
@@ -237,29 +319,27 @@ impl ContextMenu {
                 
                 if input.key_held(VirtualKeyCode::Left) {
                     self.left_key_held_time += delta_time;
-                    self.right_key_held_time = 0.0; // Reset opposite direction
+                    self.right_key_held_time = 0.0;
                     
-                    // Calculate acceleration factor (1x to 10x over 2 seconds)
                     let acceleration = (1.0 + (self.left_key_held_time / 2.0) * 9.0).min(10.0);
-                    speed_change = -SPEED_STEP * acceleration * delta_time * 60.0; // Scale for frame rate
+                    speed_change = -SPEED_STEP * acceleration * delta_time * 60.0;
                 } else {
                     self.left_key_held_time = 0.0;
                 }
                 
                 if input.key_held(VirtualKeyCode::Right) {
                     self.right_key_held_time += delta_time;
-                    self.left_key_held_time = 0.0; // Reset opposite direction
+                    self.left_key_held_time = 0.0;
                     
-                    // Calculate acceleration factor (1x to 10x over 2 seconds)
                     let acceleration = (1.0 + (self.right_key_held_time / 2.0) * 9.0).min(10.0);
-                    speed_change = SPEED_STEP * acceleration * delta_time * 60.0; // Scale for frame rate
+                    speed_change = SPEED_STEP * acceleration * delta_time * 60.0;
                 } else {
                     self.right_key_held_time = 0.0;
                 }
                 
                 if speed_change != 0.0 {
                     let new_speed = (speed + speed_change).clamp(MIN_SPEED, MAX_SPEED);
-                    self.state = ContextMenuState::BallSpeed { ball_index, speed: new_speed };
+                    self.state = ContextMenuState::BallSpeed { ball_index, speed: new_speed, reference_ball_index };
                     return None;
                 }
                 
@@ -267,6 +347,7 @@ impl ContextMenu {
                     self.state = ContextMenuState::BallMenu { ball_index, selected_option: 1 };
                     return Some(ContextMenuAction::SetSpeed { ball_index, speed });
                 }
+                
                 None
             }
             ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio, category } => {
@@ -465,10 +546,10 @@ impl ContextMenu {
                     draw_direction_menu(frame, ball_x, ball_y, selected_option);
                 }
             }
-            ContextMenuState::BallSpeed { ball_index, speed } => {
+            ContextMenuState::BallSpeed { ball_index, speed, reference_ball_index } => {
                 if let Some(ball) = balls.get(ball_index) {
                     let (ball_x, ball_y) = ball.get_grid_position();
-                    draw_speed_slider(frame, ball_x, ball_y, speed);
+                    draw_enhanced_speed_menu_with_reference(frame, ball_x, ball_y, speed, ball, reference_ball_index, balls);
                 }
             }
             ContextMenuState::BallRelativeSpeed { ball_index, selected_ball, speed_ratio, category } => {
@@ -652,9 +733,9 @@ fn draw_direction_menu(frame: &mut [u8], ball_x: usize, ball_y: usize, selected_
     }
 }
 
-fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32) {
-    let menu_width = 200;
-    let menu_height = 80;
+fn draw_enhanced_speed_menu_with_reference(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32, ball: &Ball, reference_ball_index: Option<usize>, balls: &[Ball]) {
+    let menu_width = 320;
+    let menu_height = 160;
     
     // Position menu to the right of the ball, but keep it on screen
     let mut menu_x = ball_x * CELL_SIZE + CELL_SIZE;
@@ -672,41 +753,116 @@ fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32)
     draw_menu_border(frame, menu_x, menu_y, menu_width, menu_height);
     
     // Title
-    draw_text(frame, "Speed:", menu_x + 10, menu_y + 10, [255, 255, 255], false);
+    draw_text(frame, "Ball Speed Settings", menu_x + 10, menu_y + 10, [255, 255, 255], false);
     
-    // Speed value display
-    let speed_text = format!("{:.1} units/sec", speed);
-    draw_text(frame, &speed_text, menu_x + 10, menu_y + 30, [255, 255, 0], false);
+    // Current ball being edited
+    let ball_display_x = menu_x + 15;
+    let ball_display_y = menu_y + 35;
+    let ball_color = get_color_rgb(&ball.color);
     
-    // Slider track
-    let slider_x = menu_x + 10;
-    let slider_y = menu_y + 50;
-    let slider_width = 150;
-    let slider_height = 4;
-    
-    // Draw slider track (dark gray)
-    for y in slider_y..slider_y + slider_height {
-        for x in slider_x..slider_x + slider_width {
+    // Draw current ball
+    let ball_radius = 8;
+    for y in ball_display_y.saturating_sub(ball_radius)..ball_display_y + ball_radius {
+        for x in ball_display_x.saturating_sub(ball_radius)..ball_display_x + ball_radius {
             if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
-                let index = (y * WINDOW_WIDTH + x) * 4;
-                if index + 2 < frame.len() {
-                    frame[index] = 80;     // R
-                    frame[index + 1] = 80; // G
-                    frame[index + 2] = 80; // B
+                let dx = x as i32 - ball_display_x as i32;
+                let dy = y as i32 - ball_display_y as i32;
+                if dx * dx + dy * dy <= (ball_radius as i32) * (ball_radius as i32) {
+                    let index = (y * WINDOW_WIDTH + x) * 4;
+                    if index + 2 < frame.len() {
+                        frame[index] = ball_color[0];
+                        frame[index + 1] = ball_color[1];
+                        frame[index + 2] = ball_color[2];
+                    }
                 }
             }
         }
     }
     
-    // Calculate slider position
+    // Current ball info
+    let ball_info = format!("Editing: {} ({})", ball.id, ball.color);
+    draw_text(frame, &ball_info, ball_display_x + 25, ball_display_y - 8, [255, 255, 255], false);
+    
+    let speed_text = format!("Speed: {:.1} units/sec", speed);
+    draw_text(frame, &speed_text, ball_display_x + 25, ball_display_y + 8, [255, 255, 0], false);
+    
+    // Reference ball section
+    let ref_y = menu_y + 65;
+    if let Some(ref_index) = reference_ball_index {
+        if let Some(ref_ball) = balls.get(ref_index) {
+            draw_text(frame, "Reference Ball:", menu_x + 15, ref_y, [200, 200, 200], false);
+            
+            // Draw reference ball
+            let ref_ball_x = menu_x + 15;
+            let ref_ball_y = ref_y + 20;
+            let ref_ball_color = get_color_rgb(&ref_ball.color);
+            
+            for y in ref_ball_y.saturating_sub(6)..ref_ball_y + 6 {
+                for x in ref_ball_x.saturating_sub(6)..ref_ball_x + 6 {
+                    if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
+                        let dx = x as i32 - ref_ball_x as i32;
+                        let dy = y as i32 - ref_ball_y as i32;
+                        if dx * dx + dy * dy <= 36 {
+                            let index = (y * WINDOW_WIDTH + x) * 4;
+                            if index + 2 < frame.len() {
+                                frame[index] = ref_ball_color[0];
+                                frame[index + 1] = ref_ball_color[1];
+                                frame[index + 2] = ref_ball_color[2];
+                            }
+                        }
+                    }
+                }
+            }
+            
+            let ref_info = format!("{} ({}) - {:.1} u/s", ref_ball.id, ref_ball.color, ref_ball.speed);
+            draw_text(frame, &ref_info, ref_ball_x + 20, ref_ball_y - 4, [150, 200, 255], false);
+            
+            // Speed comparison
+            let diff = speed - ref_ball.speed;
+            let comparison = if diff > 0.1 {
+                format!("+{:.1} faster", diff)
+            } else if diff < -0.1 {
+                format!("{:.1} slower", diff)
+            } else {
+                "Same speed".to_string()
+            };
+            let comp_color = if diff > 0.1 { [100, 255, 100] } else if diff < -0.1 { [255, 100, 100] } else { [200, 200, 200] };
+            draw_text(frame, &comparison, ref_ball_x + 20, ref_ball_y + 10, comp_color, false);
+        }
+    } else {
+        draw_text(frame, "No reference ball selected", menu_x + 15, ref_y, [150, 150, 150], false);
+        draw_text(frame, "Use ↑↓ to browse other balls", menu_x + 15, ref_y + 15, [120, 120, 120], false);
+    }
+    
+    // Slider (same as before but positioned lower)
+    let slider_x = menu_x + 15;
+    let slider_y = menu_y + 110;
+    let slider_width = 200;
+    let slider_height = 6;
+    
+    // Draw slider track
+    for y in slider_y..slider_y + slider_height {
+        for x in slider_x..slider_x + slider_width {
+            if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
+                let index = (y * WINDOW_WIDTH + x) * 4;
+                if index + 2 < frame.len() {
+                    frame[index] = 60;
+                    frame[index + 1] = 60;
+                    frame[index + 2] = 60;
+                }
+            }
+        }
+    }
+    
+    // Calculate and draw slider handle
     let normalized_speed = (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
     let slider_pos = slider_x + (normalized_speed * slider_width as f32) as usize;
     
-    // Draw slider handle (white circle)
-    let handle_radius = 6;
+    let handle_radius = 8;
     let handle_center_x = slider_pos;
     let handle_center_y = slider_y + slider_height / 2;
     
+    // Draw handle with ball color
     for y in handle_center_y.saturating_sub(handle_radius)..handle_center_y + handle_radius {
         for x in handle_center_x.saturating_sub(handle_radius)..handle_center_x + handle_radius {
             if x < WINDOW_WIDTH && y < WINDOW_HEIGHT {
@@ -715,9 +871,15 @@ fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32)
                 if dx * dx + dy * dy <= (handle_radius as i32) * (handle_radius as i32) {
                     let index = (y * WINDOW_WIDTH + x) * 4;
                     if index + 2 < frame.len() {
-                        frame[index] = 255;     // R
-                        frame[index + 1] = 255; // G
-                        frame[index + 2] = 255; // B
+                        if dx * dx + dy * dy <= 25 {
+                            frame[index] = ball_color[0];
+                            frame[index + 1] = ball_color[1];
+                            frame[index + 2] = ball_color[2];
+                        } else {
+                            frame[index] = 255;
+                            frame[index + 1] = 255;
+                            frame[index + 2] = 255;
+                        }
                     }
                 }
             }
@@ -725,7 +887,7 @@ fn draw_speed_slider(frame: &mut [u8], ball_x: usize, ball_y: usize, speed: f32)
     }
     
     // Instructions
-    draw_text(frame, "<- -> to adjust, Space to confirm", menu_x + 10, menu_y + 65, [180, 180, 180], false);
+    draw_text(frame, "↑↓: Browse balls, ←→: Adjust speed, Space: Confirm", menu_x + 15, menu_y + 135, [180, 180, 180], false);
 }
 
 

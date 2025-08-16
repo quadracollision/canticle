@@ -54,6 +54,7 @@ pub enum Instruction {
     SetDirection(Expression),
     SetPitch(Expression),
     SetVolume(Expression),
+    SetColor(Expression),
     Bounce,
     Stop,
     
@@ -649,6 +650,11 @@ impl SquareProgram {
                         actions.push(ProgramAction::SetVolume(volume));
                     }
                 }
+                Instruction::SetColor(expr) => {
+                    if let Value::String(color) = self.evaluate_expression(expr, context) {
+                        actions.push(ProgramAction::SetColor(color));
+                    }
+                }
                 Instruction::Bounce => {
                     actions.push(ProgramAction::Bounce);
                 }
@@ -944,6 +950,7 @@ pub enum ProgramAction {
     SetDirectionToCoordinate { target_x: f32, target_y: f32 },
     SetPitch(f32),
     SetVolume(f32),
+    SetColor(String),
     Bounce,
     Stop,
     PlaySample(usize),

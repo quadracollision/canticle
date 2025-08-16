@@ -648,6 +648,23 @@ impl SequencerGrid {
         None
     }
     
+    // Add this helper function to calculate edge position based on direction
+    fn calculate_edge_position(grid_x: usize, grid_y: usize, direction: Direction) -> (f32, f32) {
+        let base_x = grid_x as f32;
+        let base_y = grid_y as f32;
+        
+        match direction {
+            Direction::Up => (base_x + 0.5, base_y),              // Top edge (ball starts at top, moves up)
+            Direction::Down => (base_x + 0.5, base_y + 1.0),      // Bottom edge (ball starts at bottom, moves down)
+            Direction::Left => (base_x, base_y + 0.5),            // Left edge (ball starts at left, moves left)
+            Direction::Right => (base_x + 1.0, base_y + 0.5),     // Right edge (ball starts at right, moves right)
+            Direction::UpLeft => (base_x, base_y),                // Top-left corner
+            Direction::UpRight => (base_x + 1.0, base_y),         // Top-right corner
+            Direction::DownLeft => (base_x, base_y + 1.0),        // Bottom-left corner
+            Direction::DownRight => (base_x + 1.0, base_y + 1.0), // Bottom-right corner
+        }
+    }
+    
     pub fn update_balls(&mut self, delta_time: f32) -> Vec<(usize, usize, usize)> { // Returns (x, y, ball_index) where samples should be triggered
         let mut triggered_positions = Vec::new();
         
@@ -799,6 +816,10 @@ impl SequencerGrid {
                                                 ProgramAction::SetVolume(volume) => {
                                                     all_log_messages.push(format!("  → SetVolume: {}", volume));
                                                     ball.set_volume(volume);
+                                                }
+                                                ProgramAction::SetColor(color) => {
+                                                    all_log_messages.push(format!("  → SetColor: {}", color));
+                                                    ball.set_color(color);
                                                 }
                                                 ProgramAction::Return(function_name) => {
                                                     if let Some(ref func_name) = function_name {
@@ -1403,15 +1424,16 @@ impl SequencerGrid {
                                         }
                                         
                                         // Reset position based on action type
-                                        if should_snap_to_grid_center {
-                                            // Simply center the ball in the current grid square
-                                            ball.x = grid_x as f32 + 0.5;
-                                            ball.y = grid_y as f32 + 0.5;
-                                            
-                                            // Update last grid position
-                                            ball.last_grid_x = grid_x;
-                                            ball.last_grid_y = grid_y;
-                                        } else if should_reset_position {
+                        if should_snap_to_grid_center {
+                            // Position ball at the edge it should start from, based on its direction
+                            let (edge_x, edge_y) = Self::calculate_edge_position(grid_x, grid_y, ball.direction);
+                            ball.x = edge_x;
+                            ball.y = edge_y;
+                            
+                            // Update last grid position
+                            ball.last_grid_x = grid_x;
+                            ball.last_grid_y = grid_y;
+                        } else if should_reset_position {
                                             // Move ball back to previous position for other actions
                                             ball.x = old_x;
                                             ball.y = old_y;
