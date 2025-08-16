@@ -591,14 +591,14 @@ impl SimpleProgramParser {
                         
                         // Try to parse as a literal direction first
                         let direction_expr = match direction_str {
-                            "up" => Expression::Literal(Value::Direction(Direction::Up)),
-                            "down" => Expression::Literal(Value::Direction(Direction::Down)),
-                            "left" => Expression::Literal(Value::Direction(Direction::Left)),
-                            "right" => Expression::Literal(Value::Direction(Direction::Right)),
-                            "up-left" => Expression::Literal(Value::Direction(Direction::UpLeft)),
-                            "up-right" => Expression::Literal(Value::Direction(Direction::UpRight)),
-                            "down-left" => Expression::Literal(Value::Direction(Direction::DownLeft)),
-                            "down-right" => Expression::Literal(Value::Direction(Direction::DownRight)),
+                            "up" => Expression::Literal(Value::Direction(Direction::Down)),
+                            "down" => Expression::Literal(Value::Direction(Direction::Up)),
+                            "left" => Expression::Literal(Value::Direction(Direction::Right)),
+                            "right" => Expression::Literal(Value::Direction(Direction::Left)),
+                            "up-left" => Expression::Literal(Value::Direction(Direction::DownRight)),
+                            "up-right" => Expression::Literal(Value::Direction(Direction::DownLeft)),
+                            "down-left" => Expression::Literal(Value::Direction(Direction::UpRight)),
+                            "down-right" => Expression::Literal(Value::Direction(Direction::UpLeft)),
                             _ => {
                                 // Try to parse as coordinate or variable
                                 self.parse_coordinate_expression(direction_str)?
@@ -993,10 +993,10 @@ impl SimpleProgramParser {
     fn parse_direction_expression(&self, direction_str: &str) -> Result<Expression, String> {
         match direction_str {
             "self" => Ok(Expression::BallProperty(BallProperty::Direction)),
-            "up" => Ok(Expression::Literal(Value::Direction(Direction::Up))),
-            "down" => Ok(Expression::Literal(Value::Direction(Direction::Down))),
-            "left" => Ok(Expression::Literal(Value::Direction(Direction::Left))),
-            "right" => Ok(Expression::Literal(Value::Direction(Direction::Right))),
+            "up" => Ok(Expression::Literal(Value::Direction(Direction::Down))),
+            "down" => Ok(Expression::Literal(Value::Direction(Direction::Up))),
+            "left" => Ok(Expression::Literal(Value::Direction(Direction::Right))),
+            "right" => Ok(Expression::Literal(Value::Direction(Direction::Left))),
             "+1" => Ok(Expression::Literal(Value::Number(1.0))), // Treat as speed modifier for now
             "-1" => Ok(Expression::Literal(Value::Number(-1.0))),
             _ => {

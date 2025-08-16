@@ -865,6 +865,11 @@ impl AudioPlayer {
     pub fn get_all_saved_markers(&self) -> &HashMap<String, Vec<AudioMarker>> {
         &self.saved_markers
     }
+    
+    /// Save markers for a specific sample path (used by library system)
+    pub fn save_markers_for_sample(&mut self, sample_path: &str, markers: Vec<AudioMarker>) {
+        self.saved_markers.insert(sample_path.to_string(), markers);
+    }
 }
 
 impl Default for AudioPlayer {

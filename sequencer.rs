@@ -425,6 +425,20 @@ impl SequencerGrid {
             lib.samples.insert(sample_name.clone(), sample_template);
             self.log_to_console(format!("Added sample '{}' to library '{}' from {}", sample_name, library_name, local_path));
         }
+        
+        // After importing, check if this sample has markers in the audio player and save them
+        if let Some(current_sample_path) = self.audio_player.get_sample_info().map(|(path, _, _, _)| path) {
+            if current_sample_path == local_path {
+                // Clone the markers first to avoid borrowing conflicts
+                if let Some(markers) = self.audio_player.get_markers() {
+                    let markers_clone = markers.clone();
+                    let marker_count = markers_clone.len(); // Get the count before moving
+                    // Now we can safely call the mutable method
+                    self.audio_player.save_markers_for_sample(&local_path, markers_clone);
+                    self.log_to_console(format!("Saved {} markers for sample '{}'", marker_count, sample_name));
+                }
+            }
+        }
     }
     
     // Automatically add program to library when created in square
@@ -847,10 +861,15 @@ impl SequencerGrid {
                                                                         ball.set_volume(volume);
                                                                     }
                                                                     ProgramAction::SetDirection(direction) => {
-                                                                        all_log_messages.push(format!("    Function setting direction: {:?}", direction));
-                                                                        ball.direction = direction;
-                                                                        should_snap_to_grid_center = true;
-                                                                    }
+                                                        all_log_messages.push(format!("    Function setting direction: {:?}", direction));
+                                                        // Only change direction and reposition if the ball isn't already moving in that direction
+                                                        if ball.direction != direction {
+                                                            ball.direction = direction;
+                                                            should_snap_to_grid_center = true;
+                                                        } else {
+                                                            all_log_messages.push("    Ball already moving in requested direction, ignoring".to_string());
+                                                        }
+                                                    }
                                                                     ProgramAction::Bounce => {
                                                                             all_log_messages.push("    Function bouncing".to_string());
                                                                             ball.reverse_direction();
@@ -891,8 +910,13 @@ impl SequencerGrid {
                                                 }
                                                 ProgramAction::SetDirection(direction) => {
                                                     all_log_messages.push(format!("  → SetDirection: {:?}", direction));
-                                                    ball.direction = direction;
-                                                    should_snap_to_grid_center = true;
+                                                    // Only change direction and reposition if the ball isn't already moving in that direction
+                                                    if ball.direction != direction {
+                                                        ball.direction = direction;
+                                                        should_snap_to_grid_center = true;
+                                                    } else {
+                                                        all_log_messages.push("  → Ball already moving in requested direction, ignoring".to_string());
+                                                    }
                                                 }
                                                 ProgramAction::Bounce => {
                                                     all_log_messages.push("  → Bounce".to_string());
@@ -1158,8 +1182,13 @@ impl SequencerGrid {
                                                                         }
                                                                         ProgramAction::SetDirection(direction) => {
                                                                             all_log_messages.push(format!("      Function setting direction: {:?}", direction));
-                                                                            ball.direction = direction;
-                                                                            should_snap_to_grid_center = true;
+                                                                            // Only change direction and reposition if the ball isn't already moving in that direction
+                                                                            if ball.direction != direction {
+                                                                                ball.direction = direction;
+                                                                                should_snap_to_grid_center = true;
+                                                                            } else {
+                                                                                all_log_messages.push("      Ball already moving in requested direction, ignoring".to_string());
+                                                                            }
                                                                         }
                                                                         ProgramAction::Bounce => {
                                                                             all_log_messages.push("      Function bouncing".to_string());
@@ -1374,65 +1403,13 @@ impl SequencerGrid {
                                         
                                         // Reset position based on action type
                                         if should_snap_to_grid_center {
-                                            // Calculate proper diagonal trajectory instead of snapping to center
-                                            let target_grid_x = grid_x as f32 + 0.5;
-                                            let target_grid_y = grid_y as f32 + 0.5;
-                                            
-                                            // Get the new direction vector with explicit f32 types
-                                            let (new_dx, new_dy): (f32, f32) = match ball.direction {
-                                                Direction::Up => (0.0, -1.0),
-                                                Direction::Down => (0.0, 1.0),
-                                                Direction::Left => (-1.0, 0.0),
-                                                Direction::Right => (1.0, 0.0),
-                                                Direction::UpLeft => (-0.707, -0.707),
-                                                Direction::UpRight => (0.707, -0.707),
-                                                Direction::DownLeft => (-0.707, 0.707),
-                                                Direction::DownRight => (0.707, 0.707),
-                                            };
-                                            
-                                            // Calculate the distance from current position to target square center
-                                            let dx_to_target = target_grid_x - ball.x;
-                                            let dy_to_target = target_grid_y - ball.y;
-                                            
-                                            // Calculate how long it would take to reach the target at current speed
-                                            let distance_to_target = (dx_to_target * dx_to_target + dy_to_target * dy_to_target).sqrt();
-                                            
-                                            // Only adjust position if we're not already very close to the target
-                                            if distance_to_target > 0.1 {
-                                                // Calculate the time it would take to reach the next grid boundary
-                                                // in the new direction at current speed
-                                                let time_to_boundary = if new_dx.abs() > 0.001 {
-                                                    if new_dx > 0.0 {
-                                                        ((grid_x + 1) as f32 - ball.x) / new_dx
-                                                    } else {
-                                                        (grid_x as f32 - ball.x) / new_dx
-                                                    }
-                                                } else if new_dy.abs() > 0.001 {
-                                                    if new_dy > 0.0 {
-                                                        ((grid_y + 1) as f32 - ball.y) / new_dy
-                                                    } else {
-                                                        (grid_y as f32 - ball.y) / new_dy
-                                                    }
-                                                } else {
-                                                    1.0 // fallback
-                                                };
-                                                
-                                                // Adjust position to maintain timing - move ball back along the new direction
-                                                // so it will hit the target square at the right time
-                                                if time_to_boundary > 0.0 {
-                                                    let adjustment_distance = ball.speed * time_to_boundary * 0.5; // Adjust by half the time to boundary
-                                                    ball.x -= new_dx * adjustment_distance;
-                                                    ball.y -= new_dy * adjustment_distance;
-                                                    
-                                                    // Ensure ball stays within grid bounds
-                                                    ball.x = ball.x.max(0.1).min(GRID_WIDTH as f32 - 0.1);
-                                                    ball.y = ball.y.max(0.1).min(GRID_HEIGHT as f32 - 0.1);
-                                                }
-                                            }
+                                            // Simply center the ball in the current grid square
+                                            ball.x = grid_x as f32 + 0.5;
+                                            ball.y = grid_y as f32 + 0.5;
                                             
                                             // Update last grid position
-                                            ball.last_grid_x = ball.x.floor() as usize;
-                                            ball.last_grid_y = ball.y.floor() as usize;
+                                            ball.last_grid_x = grid_x;
+                                            ball.last_grid_y = grid_y;
                                         } else if should_reset_position {
                                             // Move ball back to previous position for other actions
                                             ball.x = old_x;
@@ -1690,17 +1667,7 @@ impl SequencerGrid {
             let grid_y = y as usize;
             if grid_x < GRID_WIDTH && grid_y < GRID_HEIGHT {
                 if let Some(sample_template) = self.library_manager.get_square_sample(&library_name, &sample_name) {
-                    // Parse color string to RGB array
-                    let color_rgb = if sample_template.color == "red" {
-                        [255, 100, 100]
-                    } else if sample_template.color == "blue" {
-                        [100, 100, 255]
-                    } else if sample_template.color == "green" {
-                        [100, 255, 100]
-                    } else {
-                        [200, 200, 200] // Default gray
-                    };
-                    self.cells[grid_y][grid_x].place_square(Some(color_rgb));
+                    self.cells[grid_y][grid_x].place_square(Some([255, 100, 100])); // Red square
                     if let Some(program_name) = &sample_template.behavior_program {
                         // Look up the actual program from the library
                         if let Some(library_program) = self.library_manager.get_function("lib", program_name) {
