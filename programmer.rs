@@ -1575,12 +1575,9 @@ impl ProgramExecutor {
                 }
                 
                 if name.starts_with("__ball_color_square_hits_") {
-                // Handle ball hitting 'self' (square) - extract ball ID and use current square context
-                let ball_id = &name[25..]; // Remove "__ball_color_square_hits_" prefix
-                // We need to get the ball color from the ball ID, but for now use a placeholder
-                // This will need to be enhanced to properly map ball ID to color
-                let ball_color = format!("c_white"); // This should be determined from the actual ball
-                let key = (ball_color, context.square_x, context.square_y);
+                // Handle ball hitting 'self' (square) - extract ball color from variable name
+                let ball_color = &name[25..]; // Remove "__ball_color_square_hits_" prefix to get the color
+                let key = (ball_color.to_string(), context.square_x, context.square_y);
                 let hits = self.state.ball_color_square_hits.get(&key).unwrap_or(&0);
                 println!("DEBUG: Ball color square hits for {} = {}", name, hits);
                 return Value::Number(*hits as f32);
