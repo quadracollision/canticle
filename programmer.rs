@@ -488,11 +488,12 @@ impl SimpleProgramParser {
         };
         
         // Create a condition that checks hit count for the specific object and target combination
-        // This creates a variable name that tracks hits between specific objects
         let hit_variable = if object_ref.starts_with("ball") {
             if target == "self" {
-                format!("__ball_hits_{}_{}", validated_ref, "self")
+                // For ball hitting 'self' (the square), use ball_color_square_hits
+                format!("__ball_color_square_hits_{}", validated_ref)
             } else if target.starts_with("ball") {
+                // For ball hitting another ball, use ball_object_hit_counts
                 format!("__ball_hits_{}_{}", validated_ref, validated_target)
             } else {
                 format!("__ball_hits_{}_{}", validated_ref, validated_target)
@@ -1231,34 +1232,20 @@ impl ProgramExecutor {
         square_x: usize,
         square_y: usize,
     ) -> Vec<ProgramAction> {
-        // Update hit counts
+        // Get current hit counts WITHOUT incrementing them yet
         let ball_color = self.get_ball_color(ball);
-        *self.state.ball_hit_counts.entry(ball_color.clone()).or_insert(0) += 1;
-        *self.state.square_hit_counts.entry((square_x, square_y)).or_insert(0) += 1;
-        
-        // Update ball color per square hit counts
+        let current_ball_hits = *self.state.ball_hit_counts.get(&ball_color).unwrap_or(&0);
+        let current_square_hits = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap_or(&0);
         let ball_color_square_key = (ball_color.clone(), square_x, square_y);
-        *self.state.ball_color_square_hits.entry(ball_color_square_key.clone()).or_insert(0) += 1;
-        
-        // Update ball object hit counts using the actual ball.id
+        let current_ball_color_square_hits = *self.state.ball_color_square_hits.get(&ball_color_square_key).unwrap_or(&0);
         let ball_self_key = format!("__ball_hits_{}_self", ball.id);
-        *self.state.ball_object_hit_counts.entry(ball_self_key).or_insert(0) += 1;
+        let current_ball_self_hits = *self.state.ball_object_hit_counts.get(&ball_self_key).unwrap_or(&0);
         
-        // Debug logging
-        let ball_hits = *self.state.ball_hit_counts.get(&ball_color).unwrap();
-        let square_hits = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
-        let ball_self_hits = *self.state.ball_object_hit_counts.get(&format!("__ball_hits_{}_self", ball.id)).unwrap_or(&0);
-        println!("DEBUG: Ball {} (color {:?}) hits: {}, Square ({},{}) hits: {}, Ball self hits: {}", 
-            ball.id, ball_color, ball_hits, square_x, square_y, square_hits, ball_self_hits);
-        
-        // Create execution context with the updated hit counts
-        let current_ball_hit_count = *self.state.ball_color_square_hits.get(&ball_color_square_key).unwrap();
-        let current_square_hit_count = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
-        
+        // Create execution context with CURRENT (not incremented) hit counts
         let mut context = ExecutionContext {
             variables: self.state.variables.clone(),
-            ball_hit_count: current_ball_hit_count,
-            square_hit_count: current_square_hit_count,
+            ball_hit_count: current_ball_color_square_hits,
+            square_hit_count: current_square_hits,
             ball_x: ball.x,
             ball_y: ball.y,
             ball_speed: ball.speed,
@@ -1269,8 +1256,21 @@ impl ProgramExecutor {
             square_y,
         };
         
-        // Execute the program
+        // Execute the program FIRST
         let mut actions = self.execute_instructions(&program.instructions, &mut context);
+        
+        // NOW increment hit counts AFTER execution
+        *self.state.ball_hit_counts.entry(ball_color.clone()).or_insert(0) += 1;
+        *self.state.square_hit_counts.entry((square_x, square_y)).or_insert(0) += 1;
+        *self.state.ball_color_square_hits.entry(ball_color_square_key.clone()).or_insert(0) += 1;
+        *self.state.ball_object_hit_counts.entry(ball_self_key.clone()).or_insert(0) += 1;
+        
+        // Debug logging with the NEW incremented counts
+        let ball_hits = *self.state.ball_hit_counts.get(&ball_color).unwrap();
+        let square_hits = *self.state.square_hit_counts.get(&(square_x, square_y)).unwrap();
+        let ball_self_hits = *self.state.ball_object_hit_counts.get(&ball_self_key).unwrap_or(&0);
+        println!("DEBUG: Ball {} (color {:?}) hits: {}, Square ({},{}) hits: {}, Ball self hits: {}", 
+            ball.id, ball_color, ball_hits, square_x, square_y, square_hits, ball_self_hits);
         
         // Update state with any variable changes
         self.state.variables = context.variables;
@@ -1533,16 +1533,30 @@ impl ProgramExecutor {
                     return Value::Number(*hits as f32);
                 }
                 
-                if name.starts_with("__ball_hits_c_") {
+                if name.starts_with("__ball_color_square_hits_") {
+                // Handle ball hitting 'self' (square) - extract ball ID and use current square context
+                let ball_id = &name[25..]; // Remove "__ball_color_square_hits_" prefix
+                // We need to get the ball color from the ball ID, but for now use a placeholder
+                // This will need to be enhanced to properly map ball ID to color
+                let ball_color = format!("c_white"); // This should be determined from the actual ball
+                let key = (ball_color, context.square_x, context.square_y);
+                let hits = self.state.ball_color_square_hits.get(&key).unwrap_or(&0);
+                println!("DEBUG: Ball color square hits for {} = {}", name, hits);
+                return Value::Number(*hits as f32);
+            }
+            
+            if name.starts_with("__ball_hits_c_") {
                 // Return hits for specific ball color (global)
                 let color = &name[14..]; // Remove "__ball_hits_c_" prefix
                 let hits = self.state.ball_hit_counts.get(color).unwrap_or(&0);
+                println!("DEBUG: Color hit count for {} = {}", name, hits);
                 return Value::Number(*hits as f32);
             }
             
             if name.starts_with("__ball_hits_ball") {
                 // Return hits for specific ball object (ball1, ball2, etc.)
                 let hits = self.state.ball_object_hit_counts.get(name).unwrap_or(&0);
+                println!("DEBUG: Ball object hit count for {} = {} (available keys: {:?})", name, hits, self.state.ball_object_hit_counts.keys().collect::<Vec<_>>());
                 return Value::Number(*hits as f32);
             }
             

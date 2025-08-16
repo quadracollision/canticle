@@ -740,11 +740,6 @@ impl SequencerGrid {
                         };
                         
                         if can_execute {
-                            // Increment the square's own hit count
-                            self.cells[grid_y][grid_x].program.hit_count += 1;
-                            let new_hit_count = self.cells[grid_y][grid_x].program.hit_count;
-                            all_log_messages.push(format!("Square ({},{}) hit count incremented to: {}", grid_x, grid_y, new_hit_count));
-                            
                             let square_program = &self.cells[grid_y][grid_x].program;
                             // Debug: Show what programs are available on this square
                             all_log_messages.push(format!("Square ({},{}) has {} programs, active: {:?}", 
@@ -857,15 +852,29 @@ impl SequencerGrid {
                                                                         should_snap_to_grid_center = true;
                                                                     }
                                                                     ProgramAction::Bounce => {
-                                                                        all_log_messages.push("    Function bouncing".to_string());
-                                                                        ball.reverse_direction();
-                                                                        should_reset_position = true;
-                                                                        explicit_bounce = true;
-                                                                    }
-                                                                    // Handle other actions as needed
-                                                                    _ => {
-                                                                        all_log_messages.push(format!("    Function action: {:?}", function_action));
-                                                                    }
+                                                                            all_log_messages.push("    Function bouncing".to_string());
+                                                                            ball.reverse_direction();
+                                                                            should_reset_position = true;
+                                                                            explicit_bounce = true;
+                                                                        }
+                                                                        ProgramAction::SetSliceArray { x, y, markers } => {
+                                                                            all_log_messages.push(format!("    Function setting slice array at ({}, {}) with {} markers", x, y, markers.len()));
+                                                                            
+                                                                            // Only set up the slice array if it doesn't already exist
+                                                                            if !self.program_executor.state.slice_arrays.contains_key(&(x, y)) {
+                                                                                // Store the slice array in the program executor state
+                                                                                self.program_executor.state.slice_arrays.insert((x, y), markers.clone());
+                                                                                // Initialize the hit index to 0 for first time setup
+                                                                                self.program_executor.state.slice_hit_indices.insert((x, y), 0);
+                                                                                all_log_messages.push("    Slice array initialized".to_string());
+                                                                            } else {
+                                                                                all_log_messages.push("    Slice array already exists, skipping setup".to_string());
+                                                                            }
+                                                                        }
+                                                                        // Handle other actions as needed
+                                                                        _ => {
+                                                                            all_log_messages.push(format!("    Function action: {:?}", function_action));
+                                                                        }
                                                                 }
                                                             }
                                                         } else {
